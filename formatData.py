@@ -39,6 +39,18 @@ def format_data(historical_data=True, current_season_data=False):
                     
                     headers = data[0].strip().split(",")
                     teamData = data[-1].split(",") # Last row
+                    # If the last row's player name isn't "TEAM", then that file doesn't have total stats. 
+                    # Instead, we have to sum the numerical values for all the players, 
+                    # and can use home/away values as well as dates, season, etc. of just one player
+                    # (since those should be the same for all players in the same game)
+                    if teamData[headers.index("player")] != "TEAM":
+                        teamData = data[1].split(",") # First row after header
+                        teamData[headers.index("player")] = "TEAM"
+                        for line in data[2:]:
+                            playerData = line.split(",")
+                            for i in range(len(playerData)):
+                                if playerData[i].isdigit():
+                                    teamData[i] = str(int(teamData[i]) + int(playerData[i]))
                     
                     if gameId not in games: # First half of the game
                         season = year
