@@ -1,163 +1,1013 @@
-from os import listdir
-from tqdm import tqdm
-from globals import *
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, timedelta
+from typing import Any, Dict, Iterable, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+
+import pandas as pd
+import sportsdataverse.mbb as mbb
+from tqdm.auto import tqdm
 
 
+# ============================================================
+# Modular code design with reusable functions and classes
+# ============================================================
 
-def format_data(historical_data=True, current_season_data=False):
-    """Formats the raw data from ncaahoopR into a single CSV file with one row per game.
-       Each row contains data for both teams in the game."""
-    rows = [",".join(["season", "date", 
-            "team1id", "team1home", "team1pts", "team1fgm", "team1fga", "team13ptm", "team13pta", "team1ftm", "team1fta", "team1oreb", "team1dreb", "team1ast", "team1stl", "team1blk", "team1to", "team1pf",
-            "team2id", "team2home", "team2pts", "team2fgm", "team2fga", "team23ptm", "team23pta", "team2ftm", "team2fta", "team2oreb", "team2dreb", "team2ast", "team2stl", "team2blk", "team2to", "team2pf"
-        ]) + "\n"]
 
-    games = {} # Dictionary from gameID to list of datarows
+@dataclass
+class GameExportConfig:
+    seasons: List[int]
+    output_csv: str = "mbb_games.csv"
+    points_tolerance_pct: float = 0.05
+    rebounds_tolerance_pct: float = 0.25
+    groups: int = 50
+    checkpoint_every: int = 250
+    max_games: Optional[int] = None  # set to e.g. 50 for testing
+    max_workers: int = 12
 
-    # count = 0
 
-    # Loop over every file in the directory ncaahoopR_data
-    years = listdir("ncaahoopR_data")
+OUTPUT_COLUMNS = [
+    "season",
+    "date",
+    "team1id",
+    "team1home",
+    "team1pts",
+    "team1fgm",
+    "team1fga",
+    "team13ptm",
+    "team13pta",
+    "team1ftm",
+    "team1fta",
+    "team1oreb",
+    "team1dreb",
+    "team1ast",
+    "team1stl",
+    "team1blk",
+    "team1to",
+    "team1pf",
+    "team2id",
+    "team2home",
+    "team2pts",
+    "team2fgm",
+    "team2fga",
+    "team23ptm",
+    "team23pta",
+    "team2ftm",
+    "team2fta",
+    "team2oreb",
+    "team2dreb",
+    "team2ast",
+    "team2stl",
+    "team2blk",
+    "team2to",
+    "team2pf",
+]
 
-    for year in tqdm(years):
-        # Don't do some seasons, depending on flags
-        if not current_season_data and year == currentSeason:
+
+# ============================================================
+# Properly normalized or standardized input features/data
+# ============================================================
+def resolve_columns(
+    df: pd.DataFrame, alias_map: Dict[str, List[str]]
+) -> Dict[str, str]:
+    """Resolve canonical column names using a set of aliases.
+
+    Args:
+        df: DataFrame containing the original data columns.
+        alias_map: Mapping from canonical keys to lists of possible alias names.
+
+    Returns:
+        Dictionary mapping canonical column names to the actual column names found in df.
+    """
+    lower_to_actual = {c.lower(): c for c in df.columns}
+    resolved = {}
+
+    for canonical, aliases in alias_map.items():
+        for alias in aliases:
+            if alias in df.columns:
+                resolved[canonical] = alias
+                break
+            if alias.lower() in lower_to_actual:
+                resolved[canonical] = lower_to_actual[alias.lower()]
+                break
+
+    return resolved
+
+
+SCHEDULE_ALIASES = {
+    "game_id": ["game_id", "id"],
+    "season": ["season", "year"],
+    "game_date": ["game_date", "date", "start_date"],
+    "home_id": ["home_id", "home_team_id"],
+    "away_id": ["away_id", "away_team_id"],
+    "neutral_site": ["neutral_site", "neutral", "neutralSite"],
+    "status_type_completed": ["status_type_completed", "completed"],
+    "team_box_available": ["team_box", "teamBox", "boxscore_available"],
+    "pbp_available": ["PBP", "pbp", "play_by_play_available"],
+}
+
+TEAM_BOX_ALIASES = {
+    "team_id": ["team_id", "id"],
+    "home_away": ["team_home_away", "home_away", "homeAway"],
+    "pts": ["team_score", "points", "pts"],
+    "fgm": ["field_goals_made", "fgm"],
+    "fga": ["field_goals_attempted", "fga"],
+    "tpm": ["three_point_field_goals_made", "3ptm", "fg3m"],
+    "tpa": ["three_point_field_goals_attempted", "3pta", "fg3a"],
+    "ftm": ["free_throws_made", "ftm"],
+    "fta": ["free_throws_attempted", "fta"],
+    "oreb": ["offensive_rebounds", "oreb"],
+    "dreb": ["defensive_rebounds", "dreb"],
+    "ast": ["assists", "ast"],
+    "stl": ["steals", "stl"],
+    "blk": ["blocks", "blk"],
+    "to": ["turnovers", "team_turnovers", "total_turnovers", "to"],
+    "pf": ["fouls", "personal_fouls", "pf"],
+}
+
+
+def resolve_team_box_columns(df: pd.DataFrame) -> Dict[str, str]:
+    """Resolve standardized team box score columns for a team box DataFrame.
+
+    Args:
+        df: DataFrame containing raw team box score data.
+
+    Returns:
+        Dictionary mapping standardized team stat keys to actual DataFrame columns.
+    """
+    return resolve_columns(df, TEAM_BOX_ALIASES)
+
+
+def _safe_int(value):
+    """Convert a value to int safely, returning None for invalid inputs.
+
+    Args:
+        value: The value to convert to an integer.
+
+    Returns:
+        The integer value, or None if conversion fails.
+    """
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return None
+
+
+def _parse_made_attempted(value):
+    """
+    Parse strings like '20-57' into (20, 57).
+    """
+    if value is None:
+        return (None, None)
+
+    text = str(value).strip()
+    if "-" not in text:
+        return (None, None)
+
+    left, right = text.split("-", 1)
+    return _safe_int(left), _safe_int(right)
+
+
+def fetch_team_box_df(game_id: int) -> Optional[pd.DataFrame]:
+    """Fetch team box score data for a game from the ESPN play-by-play endpoint.
+
+    This function uses the sportsdataverse espn_mbb_pbp endpoint with raw=False to
+    extract team-level statistics when the dedicated team box endpoint is unavailable.
+
+    Args:
+        game_id: ESPN game identifier.
+
+    Returns:
+        DataFrame with one row per team, or None if the fetch or parsing fails.
+    """
+
+    # ============================================================
+    # Properly normalized or standardized input features/data
+    # (Yes, again. This time, deleting games with missing fields!)
+    # ============================================================
+    try:
+        payload = mbb.espn_mbb_pbp(game_id=game_id, raw=False)
+    except Exception as e:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    boxscore = payload.get("boxscore")
+    if not isinstance(boxscore, dict):
+        return None
+
+    teams = boxscore.get("teams")
+    if not isinstance(teams, list) or len(teams) == 0:
+        return None
+
+    rows = []
+
+    for team_entry in teams:
+        if not isinstance(team_entry, dict):
             continue
-        if not historical_data and year != currentSeason:
+
+        team_info = team_entry.get("team", {})
+        stats_list = team_entry.get("statistics", [])
+        home_away = team_entry.get("homeAway")
+
+        if not isinstance(team_info, dict) or not isinstance(stats_list, list):
             continue
-        # Now, iterate through each school folder in year/box_scores
+
+        team_id = _safe_int(team_info.get("id"))
+        if team_id is None:
+            continue
+
+        stats_map = {}
+        for stat in stats_list:
+            if not isinstance(stat, dict):
+                continue
+            name = stat.get("name")
+            display_value = stat.get("displayValue")
+            if name is not None:
+                stats_map[name] = display_value
+
+        fgm, fga = _parse_made_attempted(
+            stats_map.get("fieldGoalsMade-fieldGoalsAttempted")
+        )
+        tpm, tpa = _parse_made_attempted(
+            stats_map.get("threePointFieldGoalsMade-threePointFieldGoalsAttempted")
+        )
+        ftm, fta = _parse_made_attempted(
+            stats_map.get("freeThrowsMade-freeThrowsAttempted")
+        )
+
+        oreb = _safe_int(stats_map.get("offensiveRebounds"))
+        dreb = _safe_int(stats_map.get("defensiveRebounds"))
+        treb = _safe_int(stats_map.get("totalRebounds"))
+        ast = _safe_int(stats_map.get("assists"))
+        stl = _safe_int(stats_map.get("steals"))
+        blk = _safe_int(stats_map.get("blocks"))
+        to = _safe_int(stats_map.get("turnovers"))
+        pf = _safe_int(stats_map.get("fouls"))
+
+        required_values = [
+            fgm,
+            fga,
+            tpm,
+            tpa,
+            ftm,
+            fta,
+            oreb,
+            dreb,
+            ast,
+            stl,
+            blk,
+            to,
+            pf,
+        ]
+        if any(v is None for v in required_values):
+            continue
+
+        # ESPN's team boxscore in this payload does not include raw points directly,
+        # so compute it from shooting totals.
+        pts = 2 * (fgm - tpm) + 3 * tpm + ftm
+
+        rows.append(
+            {
+                "team_id": team_id,
+                "team_home_away": home_away,
+                "team_score": pts,
+                "field_goals_made": fgm,
+                "field_goals_attempted": fga,
+                "three_point_field_goals_made": tpm,
+                "three_point_field_goals_attempted": tpa,
+                "free_throws_made": ftm,
+                "free_throws_attempted": fta,
+                "offensive_rebounds": oreb,
+                "defensive_rebounds": dreb,
+                "total_rebounds": treb if treb is not None else (oreb + dreb),
+                "assists": ast,
+                "steals": stl,
+                "blocks": blk,
+                "turnovers": to,
+                "fouls": pf,
+            }
+        )
+
+    if len(rows) == 0:
+        return None
+
+    return pd.DataFrame(rows)
+
+
+def season_date_range(season: int) -> List[date]:
+    """Return every calendar date in the college basketball season window.
+
+    The season window is defined from November 1 of the prior year through April 30
+    of the given season year.
+
+    Args:
+        season: Season year, e.g. 2024 for the 2023-24 season.
+
+    Returns:
+        List of date objects covering the season date range.
+    """
+    start = date(season - 1, 11, 1)
+    end = date(season, 4, 30)
+    out = []
+    current = start
+    while current <= end:
+        out.append(current)
+        current += timedelta(days=1)
+    return out
+
+
+def season_date_ok(season: int, game_date: date) -> bool:
+    """Check whether a game date falls within the expected season window.
+
+    Args:
+        season: Season year, e.g. 2024.
+        game_date: Date of the game.
+
+    Returns:
+        True if the game_date is within November 1 of the prior year through April 30 of season.
+    """
+    start = date(season - 1, 11, 1)
+    end = date(season, 4, 30)
+    return start <= game_date <= end
+
+
+def coerce_int(value: Any) -> Optional[int]:
+    """Coerce a value to an integer, returning None for missing or invalid values.
+
+    Args:
+        value: Input value that may be numeric or missing.
+
+    Returns:
+        The coerced integer, or None if coercion is not possible.
+    """
+    if value is None or pd.isna(value):
+        return None
+    try:
+        return int(float(value))
+    except Exception:
+        return None
+
+
+def basic_stat_logic(team: Dict[str, int]) -> bool:
+    """Validate basic team stat relationships and ranges.
+
+    Args:
+        team: Dictionary of team statistics keyed by canonical stat names.
+
+    Returns:
+        True if the team stats satisfy basic consistency checks, False otherwise.
+    """
+    vals = [
+        team["pts"],
+        team["fgm"],
+        team["fga"],
+        team["tpm"],
+        team["tpa"],
+        team["ftm"],
+        team["fta"],
+        team["oreb"],
+        team["dreb"],
+        team["ast"],
+        team["stl"],
+        team["blk"],
+        team["to"],
+        team["pf"],
+    ]
+    if any(v < 0 for v in vals):
+        return False
+    if team["fgm"] > team["fga"]:
+        return False
+    if team["tpm"] > team["tpa"]:
+        return False
+    if team["tpm"] > team["fgm"]:
+        return False
+    if team["ftm"] > team["fta"]:
+        return False
+    return True
+
+
+def points_formula_ok(team: Dict[str, int], tolerance_pct: float) -> bool:
+    """Check that reported team points match expected points from shot totals.
+
+    Args:
+        team: Dictionary of canonical team stats.
+        tolerance_pct: Maximum allowed relative tolerance between reported and expected points.
+
+    Returns:
+        True if the computed points are within tolerance, False otherwise.
+    """
+    expected = 2 * (team["fgm"] - team["tpm"]) + 3 * team["tpm"] + team["ftm"]
+    if expected <= 0:
+        return False
+    rel_err = abs(team["pts"] - expected) / expected
+    return rel_err <= tolerance_pct
+
+
+def rebound_sanity_ok(
+    t1: Dict[str, int], t2: Dict[str, int], tolerance_pct: float
+) -> bool:
+    """Validate total rebounds against available rebound opportunities.
+
+    Args:
+        t1: Team 1 statistics.
+        t2: Team 2 statistics.
+        tolerance_pct: Maximum allowed relative tolerance for rebound consistency.
+
+    Returns:
+        True if the total recorded rebounds are consistent with missed shot and free throw opportunities.
+    """
+    total_reb = t1["oreb"] + t1["dreb"] + t2["oreb"] + t2["dreb"]
+    rebound_opps = (
+        (t1["fga"] - t1["fgm"])
+        + (t2["fga"] - t2["fgm"])
+        + (t1["fta"] - t1["ftm"])
+        + (t2["fta"] - t2["ftm"])
+    )
+    if rebound_opps <= 0:
+        return False
+    rel_err = abs(total_reb - rebound_opps) / rebound_opps
+    return rel_err <= tolerance_pct
+
+
+class BoxscoreParser:
+    TEAM_STAT_ALIASES: Dict[str, List[str]] = {
+        "team_id": ["team_id", "id"],
+        "pts": ["team_score", "points", "pts"],
+        "fgm": ["field_goals_made", "fgm"],
+        "fga": ["field_goals_attempted", "fga"],
+        "tpm": ["three_point_field_goals_made", "3ptm", "fg3m"],
+        "tpa": ["three_point_field_goals_attempted", "3pta", "fg3a"],
+        "ftm": ["free_throws_made", "ftm"],
+        "fta": ["free_throws_attempted", "fta"],
+        "oreb": ["offensive_rebounds", "oreb"],
+        "dreb": ["defensive_rebounds", "dreb"],
+        "ast": ["assists", "ast"],
+        "stl": ["steals", "stl"],
+        "blk": ["blocks", "blk"],
+        "to": ["turnovers", "team_turnovers", "total_turnovers", "to"],
+        "pf": ["fouls", "personal_fouls", "pf"],
+    }
+
+    @classmethod
+    def parse_two_teams(cls, obj: Any) -> Optional[List[Dict[str, Any]]]:
+        """Parse two teams worth of box score statistics from a raw object.
+
+        Args:
+            obj: Raw box score data, which may be a DataFrame, list of dicts, or nested payload.
+
+        Returns:
+            A list of two normalized team stat dictionaries, or None if parsing fails.
+        """
+        rows = cls._to_rows(obj)
+        if not rows:
+            return None
+
+        parsed = []
+        for row in rows:
+            item = cls._extract_stats(row)
+            if item is not None:
+                parsed.append(item)
+
+        parsed = [
+            x
+            for x in parsed
+            if x.get("team_id") is not None and x.get("fgm") is not None
+        ]
+        if len(parsed) != 2:
+            return None
+        return parsed
+
+    @classmethod
+    def _to_rows(cls, obj: Any) -> Optional[List[Dict[str, Any]]]:
+        """Normalize a raw box score payload into a list of row dictionaries.
+
+        Args:
+            obj: Raw payload that may be a DataFrame, dict, list, or convertible object.
+
+        Returns:
+            A list of row dictionaries when the input can be normalized, otherwise None.
+        """
+        if obj is None:
+            return None
+
+        if isinstance(obj, pd.DataFrame):
+            return obj.to_dict(orient="records")
+
+        if isinstance(obj, list):
+            if all(isinstance(x, dict) for x in obj):
+                return obj
+            return None
+
+        if isinstance(obj, dict):
+            if any(k in obj for k in cls.TEAM_STAT_ALIASES["fgm"]):
+                return [obj]
+
+            for key in ["boxscore", "teams", "rows", "items", "data"]:
+                value = obj.get(key)
+                if isinstance(value, list) and all(isinstance(x, dict) for x in value):
+                    return value
+                if isinstance(value, pd.DataFrame):
+                    return value.to_dict(orient="records")
+
+            try:
+                df = pd.DataFrame(obj)
+                if len(df) >= 2:
+                    return df.to_dict(orient="records")
+            except Exception:
+                pass
+
+        return None
+
+    @classmethod
+    def _extract_stats(cls, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Extract canonical team statistics from a row dictionary.
+
+        Args:
+            row: Dictionary containing raw team stat fields.
+
+        Returns:
+            Dictionary with canonical stat keys mapped to values from the input row.
+        """
+        lower_map = {str(k).lower(): k for k in row.keys()}
+        out = {}
+        for canonical, aliases in cls.TEAM_STAT_ALIASES.items():
+            val = None
+            for alias in aliases:
+                if alias in row:
+                    val = row[alias]
+                    break
+                if alias.lower() in lower_map:
+                    val = row[lower_map[alias.lower()]]
+                    break
+            out[canonical] = val
+        return out
+
+
+class CollegeBasketballGameExporter:
+    REQUIRED_NUMERIC_FIELDS = [
+        "pts",
+        "fgm",
+        "fga",
+        "tpm",
+        "tpa",
+        "ftm",
+        "fta",
+        "oreb",
+        "dreb",
+        "ast",
+        "stl",
+        "blk",
+        "to",
+        "pf",
+    ]
+
+    MINIMUMS = {
+        "pts": 20,
+        "fgm": 5,
+        "fga": 15,
+        "tpa": 5,
+        "ftm": 2,
+        "fta": 2,
+        "oreb": 3,
+        "dreb": 5,
+        "ast": 1,
+        "to": 1,
+        "pf": 1,
+    }
+
+    def __init__(self, config: GameExportConfig):
+        """Initialize the exporter with a configuration object.
+
+        Args:
+            config: GameExportConfig containing export settings and filters.
+        """
+        self.config = config
+        self.reject_counts = {}
+        self._reject_lock = threading.Lock()
+
+    def export(self) -> pd.DataFrame:
+        """Export college basketball games to a standardized CSV DataFrame.
+
+        This method fetches completed game schedules for the configured seasons, filters
+        games with available box score data, validates each game entry, and writes the
+        resulting dataset to the configured output CSV.
+
+        Returns:
+            DataFrame containing validated game box score rows.
+        """
+        rows = []
+        all_schedule_rows = []
+
+        all_dates = []
+        for season in self.config.seasons:
+            all_dates.extend(season_date_range(season))
+        all_dates = sorted(all_dates)
+
+        date_bar = tqdm(all_dates, desc="Dates", unit="day")
+
+        # First pass: gather all completed schedule rows
+        for day in date_bar:
+            date_bar.set_postfix_str(day.isoformat())
+
+            try:
+                daily = mbb.espn_mbb_schedule(
+                    dates=int(day.strftime("%Y%m%d")),
+                    groups=self.config.groups,
+                    season_type=None,
+                    limit=1000,
+                    return_as_pandas=True,
+                )
+            except Exception as e:
+                tqdm.write(f"[WARN] schedule fetch failed for {day}: {e}")
+                continue
+
+            if daily is None:
+                continue
+            if not isinstance(daily, pd.DataFrame):
+                daily = pd.DataFrame(daily)
+
+            # Only keep completed games
+            if "status_type_completed" in daily.columns:
+                daily = daily[daily["status_type_completed"] == True].copy()
+
+            # Only keep games where ESPN says the relevant data exists
+            if "team_box_available" in daily.columns:
+                daily = daily[daily["team_box_available"] == True].copy()
+
+            # Since fetch_team_box_df currently uses espn_mbb_pbp(...), this matters too
+            if "pbp_available" in daily.columns:
+                daily = daily[daily["pbp_available"] == True].copy()
+
+            if daily.empty:
+                continue
+
+            colmap = resolve_columns(daily, SCHEDULE_ALIASES)
+
+            required_keys = ["game_id", "season", "game_date", "home_id", "away_id"]
+            missing_keys = [k for k in required_keys if k not in colmap]
+            if missing_keys:
+                tqdm.write(
+                    f"[WARN] missing expected schedule columns for {day}. "
+                    f"Missing canonical keys: {missing_keys}. "
+                    f"Actual columns: {daily.columns.tolist()}"
+                )
+                continue
+
+            daily = daily.rename(columns={v: k for k, v in colmap.items()}).copy()
+
+            daily["game_id"] = pd.to_numeric(daily["game_id"], errors="coerce")
+            daily["season"] = pd.to_numeric(daily["season"], errors="coerce")
+            daily["home_id"] = pd.to_numeric(daily["home_id"], errors="coerce")
+            daily["away_id"] = pd.to_numeric(daily["away_id"], errors="coerce")
+            daily["game_date"] = pd.to_datetime(
+                daily["game_date"], errors="coerce"
+            ).dt.date
+
+            if "neutral_site" in daily.columns:
+                daily["neutral_site"] = daily["neutral_site"].fillna(False).astype(bool)
+            else:
+                daily["neutral_site"] = False
+
+            daily = daily.dropna(
+                subset=["game_id", "season", "game_date", "home_id", "away_id"]
+            ).copy()
+
+            if "status_type_completed" in daily.columns:
+                daily = daily[daily["status_type_completed"] == True].copy()
+
+            if daily.empty:
+                continue
+
+            daily = daily[
+                daily.apply(
+                    lambda r: season_date_ok(int(r["season"]), r["game_date"]),
+                    axis=1,
+                )
+            ].copy()
+
+            if daily.empty:
+                continue
+
+            daily = daily.sort_values(["game_date", "game_id"]).reset_index(drop=True)
+
+            for _, row in daily.iterrows():
+                all_schedule_rows.append(row.copy())
+                if (
+                    self.config.max_games is not None
+                    and len(all_schedule_rows) >= self.config.max_games
+                ):
+                    break
+
+            if (
+                self.config.max_games is not None
+                and len(all_schedule_rows) >= self.config.max_games
+            ):
+                break
+
+        date_bar.close()
+
+        # Second pass: process games in parallel
+        proc_bar = tqdm(
+            total=len(all_schedule_rows),
+            desc="Games seen",
+            unit="game",
+            leave=True,
+            dynamic_ncols=True,
+            ascii=True,
+        )
+
+        games_kept = 0
+
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            futures = [
+                executor.submit(self._process_game_row, row)
+                for row in all_schedule_rows
+            ]
+
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                except Exception:
+                    result = None
+
+                if result is not None:
+                    rows.append(result)
+                    games_kept += 1
+
+                proc_bar.update(1)
+                proc_bar.set_postfix_str(f"kept={games_kept}")
+        proc_bar.close()
+
+        out = pd.DataFrame(rows)
+        if out.empty:
+            out = pd.DataFrame(columns=OUTPUT_COLUMNS)
+        else:
+            out = out.sort_values(["date", "season", "team1id", "team2id"]).reset_index(
+                drop=True
+            )
+            out = out[OUTPUT_COLUMNS]
+
+        out.to_csv(self.config.output_csv, index=False)
+        print("Reject counts:", self.reject_counts)
+        return out
+
+    def _process_game_row(self, sched_row: pd.Series) -> Optional[Dict[str, Any]]:
+        """Process a single scheduled game row and return a validated export record.
+
+        Args:
+            sched_row: Series containing schedule fields for one game.
+
+        Returns:
+            Dictionary for the validated game export row, or None if the game is rejected.
+        """
+
+        def reject(reason: str) -> None:
+            with self._reject_lock:
+                self.reject_counts[reason] = self.reject_counts.get(reason, 0) + 1
+            return None
+
         try:
-            schools = listdir(f"ncaahoopR_data/{year}/box_scores")
-        except FileNotFoundError:
-            continue # Probably not a year
-        for school in tqdm(schools, desc=f"Processing year {year}"):
-            # Iterate through each game file in year/box_scores/school
-            gameIds = listdir(f"ncaahoopR_data/{year}/box_scores/{school}")
-            for gameId in gameIds:
-                with open(f"ncaahoopR_data/{year}/box_scores/{school}/{gameId}", "r") as f:
-                    data = f.readlines()
-                    
-                    headers = data[0].strip().split(",")
-                    teamData = data[-1].split(",") # Last row
-                    # If the last row's player name isn't "TEAM", then that file doesn't have total stats. 
-                    # Instead, we have to sum the numerical values for all the players, 
-                    # and can use home/away values as well as dates, season, etc. of just one player
-                    # (since those should be the same for all players in the same game)
-                    if teamData[headers.index("player")] != "TEAM":
-                        teamData = data[1].split(",") # First row after header
-                        teamData[headers.index("player")] = "TEAM"
-                        for line in data[2:]:
-                            playerData = line.split(",")
-                            for i in range(len(playerData)):
-                                if playerData[i].isdigit():
-                                    teamData[i] = str(int(teamData[i]) + int(playerData[i]))
-                    
-                    if gameId not in games: # First half of the game
-                        season = year
-                        date = teamData[headers.index("date")]
-                        team2id = teamData[headers.index("opponent")]
-                        try:
-                            team1home = True if teamData[headers.index("home")] == "TRUE" else False
-                        except ValueError:
-                            try:
-                                team1home = True if teamData[headers.index("location")] == "H" else False
-                            except ValueError:
-                                team1home = False
-                        team1pts = teamData[headers.index("PTS")]
-                        team1fgm = teamData[headers.index("FGM")]
-                        team1fga = teamData[headers.index("FGA")]
-                        team13ptm = teamData[headers.index("3PTM")]
-                        team13pta = teamData[headers.index("3PTA")]
-                        team1ftm = teamData[headers.index("FTM")]
-                        team1fta = teamData[headers.index("FTA")]
-                        team1oreb = teamData[headers.index("OREB")]
-                        team1dreb = teamData[headers.index("DREB")]
-                        team1ast = teamData[headers.index("AST")]
-                        team1stl = teamData[headers.index("STL")]
-                        team1blk = teamData[headers.index("BLK")]
-                        team1to = teamData[headers.index("TO")]
-                        team1pf = teamData[headers.index("PF")]
-                        
-                        team1Data = [season, date, team2id, team1home, team1pts, team1fgm, team1fga, team13ptm, team13pta, team1ftm, team1fta, team1oreb, team1dreb, team1ast, team1stl, team1blk, team1to, team1pf]
-                        
-                        # Check if any of these are NA, and if so, skip this game
-                        if "NA" in team1Data:
-                            # print(team1Data.index("NA"), gameId, season)
-                            continue
-                        
-                        games[gameId] = team1Data
-                        # print(f"Added first half of game {gameId}. Data: {games[gameId]}")
-                    else:
-                        team1id = teamData[headers.index("opponent")]
-                        try:
-                            team2home = True if teamData[headers.index("home")] == "TRUE" else False
-                        except ValueError:
-                            try:
-                                team2home = True if teamData[headers.index("location")] == "H" else False
-                            except ValueError:
-                                team2home = False
-                        team2pts = teamData[headers.index("PTS")]
-                        team2fgm = teamData[headers.index("FGM")]
-                        team2fga = teamData[headers.index("FGA")]
-                        team23ptm = teamData[headers.index("3PTM")]
-                        team23pta = teamData[headers.index("3PTA")]
-                        team2ftm = teamData[headers.index("FTM")]
-                        team2fta = teamData[headers.index("FTA")]
-                        team2oreb = teamData[headers.index("OREB")]
-                        team2dreb = teamData[headers.index("DREB")]
-                        team2ast = teamData[headers.index("AST")]
-                        team2stl = teamData[headers.index("STL")]
-                        team2blk = teamData[headers.index("BLK")]
-                        team2to = teamData[headers.index("TO")]
-                        team2pf = teamData[headers.index("PF")]
-                        
-                        # Check if any of these are NA, and if so, delete this game
-                        team2Data = [team1id, team2home, team2pts, team2fgm, team2fga, team23ptm, team23pta, team2ftm, team2fta, team2oreb, team2dreb, team2ast, team2stl, team2blk, team2to, team2pf]
-                        if "NA" in team2Data:
-                            del games[gameId]
-                            continue
-                        # There are some bizzarre weird cases where both teams are "home." These are cursed games and other things are wrong with them as well. Delete them.
-                        if games[gameId][3] == True and team2home == True:
-                            del games[gameId]
-                            continue
-                        games[gameId].extend(team2Data)
-                        
-                        # Swap team1index and team2index
-                        team2id = games[gameId][2]
-                        games[gameId][2] = team1id
-                        games[gameId][18] = team2id
-                        # print(gameId, "completed. Data:", games[gameId])
-                    # count += 1
-                    # if count > 100:
-                    #     print(games)
-                    #     exit(0)
+            game_id = int(sched_row["game_id"])
+            season = int(sched_row["season"])
+            game_date = sched_row["game_date"]
+            home_id = int(sched_row["home_id"])
+            away_id = int(sched_row["away_id"])
+            neutral_site = bool(sched_row.get("neutral_site", False))
+        except Exception:
+            return reject("bad_schedule_row")
 
-    for game in tqdm(games):
-        # if len(games[game]) != len(rows):
-        #     print(f"Game {game} has incomplete data, skipping.")
-        #     continue
-        line = ",".join([str(x) for x in games[game]]) + "\n"
-        rows.append(line)
-        
-    # Open the data file corresponding to the flag in append mode
-    if historical_data:
-        dataFile = historicalDataFile
-    else:
-        dataFile = currentSeasonDataFile
-    with open(dataFile, "a") as f:
-        for line in rows:
-            # One last check to make sure line is complete
-            fields = line.strip().split(",")
-            if len(fields) != 34:
-                print(f"Found incomplete line: {line}")
-                continue
-            # There's this one line that had a Duke vs WF game where it says Duke scored 18 (they actually scored 101). That line is just bizzarre
-            if fields[2] == "Duke" and fields[18] == "Wake Forest" and fields[4] == "18":
-                print(f"Deleting bizzarre Duke vs Wake Forest line: {line}")
-                continue
-            f.write(line)
-    f.close()
-    
+        if pd.isna(game_date):
+            return reject("missing_game_date")
+
+        if not season_date_ok(season, game_date):
+            return reject("season_date_mismatch")
+
+        team_box_df = fetch_team_box_df(game_id)
+        if team_box_df is None:
+            return reject("team_box_fetch_failed")
+
+        if not isinstance(team_box_df, pd.DataFrame):
+            try:
+                team_box_df = pd.DataFrame(team_box_df)
+            except Exception:
+                return reject("team_box_not_dataframe")
+
+        if team_box_df.empty:
+            return reject("team_box_empty")
+
+        colmap = resolve_team_box_columns(team_box_df)
+
+        required = [
+            "team_id",
+            "pts",
+            "fgm",
+            "fga",
+            "tpm",
+            "tpa",
+            "ftm",
+            "fta",
+            "oreb",
+            "dreb",
+            "ast",
+            "stl",
+            "blk",
+            "to",
+            "pf",
+        ]
+
+        missing_required = [k for k in required if k not in colmap]
+        if missing_required:
+            return reject(f"missing_team_box_cols:{','.join(missing_required)}")
+
+        try:
+            team_box_df = team_box_df.rename(
+                columns={v: k for k, v in colmap.items()}
+            ).copy()
+        except Exception:
+            return reject("team_box_rename_failed")
+
+        keep_cols = required.copy()
+        if "home_away" in team_box_df.columns:
+            keep_cols.append("home_away")
+
+        try:
+            team_box_df = team_box_df[keep_cols].copy()
+        except Exception:
+            return reject("team_box_keep_cols_failed")
+
+        for col in required:
+            team_box_df[col] = pd.to_numeric(team_box_df[col], errors="coerce")
+
+        team_box_df = team_box_df.dropna(subset=required).copy()
+        if team_box_df.empty:
+            return reject("team_box_all_missing_after_numeric")
+
+        try:
+            team_box_df["team_id"] = team_box_df["team_id"].astype(int)
+        except Exception:
+            return reject("team_id_cast_failed")
+
+        team_box_df = team_box_df[
+            team_box_df["team_id"].isin([home_id, away_id])
+        ].copy()
+
+        if len(team_box_df) != 2:
+            return reject(f"team_box_not_two_rows:{len(team_box_df)}")
+
+        teams = team_box_df.to_dict(orient="records")
+        normalized = []
+
+        for t in teams:
+            t = dict(t)
+
+            try:
+                for field in self.REQUIRED_NUMERIC_FIELDS:
+                    t[field] = int(t[field])
+                t["team_id"] = int(t["team_id"])
+            except Exception:
+                return reject("team_numeric_cast_failed")
+
+            if t["team_id"] == home_id:
+                t["team_home_bool"] = False if neutral_site else True
+            elif t["team_id"] == away_id:
+                t["team_home_bool"] = False
+            else:
+                return reject("team_id_not_home_or_away")
+
+            normalized.append(t)
+
+        if len(normalized) != 2:
+            return reject("normalized_not_two_teams")
+
+        if neutral_site:
+            normalized.sort(key=lambda x: x["team_id"])
+        else:
+            normalized.sort(
+                key=lambda x: (0 if x["team_home_bool"] else 1, x["team_id"])
+            )
+
+        t1, t2 = normalized
+
+        if not self._passes_all_checks(t1, t2, neutral_site):
+            return reject("failed_validation_checks")
+
+        try:
+            return {
+                "season": season,
+                "date": game_date.isoformat(),
+                "team1id": t1["team_id"],
+                "team1home": bool(t1["team_home_bool"]),
+                "team1pts": t1["pts"],
+                "team1fgm": t1["fgm"],
+                "team1fga": t1["fga"],
+                "team13ptm": t1["tpm"],
+                "team13pta": t1["tpa"],
+                "team1ftm": t1["ftm"],
+                "team1fta": t1["fta"],
+                "team1oreb": t1["oreb"],
+                "team1dreb": t1["dreb"],
+                "team1ast": t1["ast"],
+                "team1stl": t1["stl"],
+                "team1blk": t1["blk"],
+                "team1to": t1["to"],
+                "team1pf": t1["pf"],
+                "team2id": t2["team_id"],
+                "team2home": bool(t2["team_home_bool"]),
+                "team2pts": t2["pts"],
+                "team2fgm": t2["fgm"],
+                "team2fga": t2["fga"],
+                "team23ptm": t2["tpm"],
+                "team23pta": t2["tpa"],
+                "team2ftm": t2["ftm"],
+                "team2fta": t2["fta"],
+                "team2oreb": t2["oreb"],
+                "team2dreb": t2["dreb"],
+                "team2ast": t2["ast"],
+                "team2stl": t2["stl"],
+                "team2blk": t2["blk"],
+                "team2to": t2["to"],
+                "team2pf": t2["pf"],
+            }
+        except Exception:
+            return reject("final_row_build_failed")
+
+    def _passes_all_checks(
+        self, t1: Dict[str, int], t2: Dict[str, int], neutral_site: bool
+    ) -> bool:
+        """Run validation checks on a pair of team stat dictionaries.
+
+        Args:
+            t1: Team 1 statistics.
+            t2: Team 2 statistics.
+            neutral_site: Whether the game was played at a neutral site.
+
+        Returns:
+            True if both team stat sets pass all validation checks, False otherwise.
+        """
+        for team in (t1, t2):
+            for stat, min_val in self.MINIMUMS.items():
+                if team[stat] < min_val:
+                    return False
+
+            if not basic_stat_logic(team):
+                return False
+
+            if not points_formula_ok(team, self.config.points_tolerance_pct):
+                return False
+
+            if team["ast"] > team["fgm"]:
+                return False
+
+        if neutral_site:
+            if t1["team_home_bool"] or t2["team_home_bool"]:
+                return False
+        else:
+            if int(t1["team_home_bool"]) + int(t2["team_home_bool"]) != 1:
+                return False
+
+        if not rebound_sanity_ok(t1, t2, self.config.rebounds_tolerance_pct):
+            return False
+
+        return True
+
+
+def export_mbb_games_to_csv(
+    seasons: List[int],
+    output_csv: str = "mbb_games.csv",
+    max_games: Optional[int] = None,
+) -> pd.DataFrame:
+    """Convenience function to export games for given seasons to a CSV file.
+
+    Args:
+        seasons: List of season years to fetch.
+        output_csv: Output filename for the exported CSV.
+        max_games: Optional maximum number of games to process for testing.
+
+    Returns:
+        DataFrame containing the exported games.
+    """
+    exporter = CollegeBasketballGameExporter(
+        GameExportConfig(
+            seasons=seasons,
+            output_csv=output_csv,
+            max_games=max_games,
+            max_workers=12,  # try 8, 12, or 16
+        )
+    )
+    return exporter.export()
+
+
 if __name__ == "__main__":
-    format_data(historical_data=True, current_season_data=False)
-    # format_data(historical_data=False, current_season_data=True)
+    df = export_mbb_games_to_csv(
+        seasons=[i for i in range(2001, 2027)],
+        output_csv="mbb_games.csv",
+        max_games=None,  # Start at ~20, then change to None once testing works
+    )
+    print(df.head())
+    print(f"Wrote {len(df):,} valid games to mbb_games.csv")
