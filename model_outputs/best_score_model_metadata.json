@@ -1,0 +1,36 @@
+{
+  "model_config": {
+    "num_cont_features": 165,
+    "num_teams": 1348,
+    "embedding_dim": 16,
+    "hidden_dims": [
+      256,
+      128,
+      64
+    ],
+    "dropout": 0.2
+  },
+  "train_config": {
+    "epochs": 75,
+    "batch_size": 128,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "l1_lambda": 1e-06,
+    "patience": 10,
+    "min_delta": 0.0001,
+    "optimizer_name": "adam",
+    "scheduler_name": "reduce_on_plateau",
+    "scheduler_factor": 0.5,
+    "scheduler_patience": 4,
+    "scheduler_step_size": 10,
+    "scheduler_gamma": 0.5,
+    "seed": 42
+  },
+  "best_split_ratio": [
+    0.8,
+    0.1,
+    0.1
+  ],
+  "weights_path": "model_outputs\\best_score_model.pt",
+  "standardizer_path": "model_outputs\\best_standardizer.pt"
+}

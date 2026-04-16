@@ -1,0 +1,30 @@
+import json
+from pathlib import Path
+
+from sportsdataverse.mbb.mbb_teams import espn_mbb_teams
+
+OUT = Path("web/public/data/teams.json")
+OUT.parent.mkdir(parents=True, exist_ok=True)
+
+def main():
+    # Division I is group 50 per SportsDataverse docs
+    df = espn_mbb_teams(groups=50, return_as_pandas=True)
+
+    teams = {}
+    for _, row in df.iterrows():
+        team_id = int(row["team_id"]) if "team_id" in row else int(row["id"])
+        teams[str(team_id)] = {
+            "id": team_id,
+            "displayName": row.get("display_name") or row.get("team_display_name") or row.get("name"),
+            "shortName": row.get("short_name") or row.get("team_short_display_name"),
+            "abbreviation": row.get("abbreviation"),
+            "conference": row.get("conference_name") if "conference_name" in row else None,
+        }
+
+    with OUT.open("w", encoding="utf-8") as f:
+        json.dump(teams, f, indent=2, ensure_ascii=False)
+
+    print(f"Wrote {len(teams)} teams to {OUT}")
+
+if __name__ == "__main__":
+    main()

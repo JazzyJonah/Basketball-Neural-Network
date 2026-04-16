@@ -16,8 +16,8 @@ from tqdm.auto import tqdm
 class FeatureConfig:
     fta_weight: float = 0.44
     decay_days: int = 180
-    feature_cache_path: str = "team_feature_cache.pkl"
-    matchup_cache_path: str = "matchup_feature_cache.pkl"
+    feature_cache_path: str = "team_feature_cache.pkl.gz"
+    matchup_cache_path: str = "matchup_feature_cache.pkl.gz"
     sort_cache_by_date: bool = True
     verbose: bool = True
 
@@ -532,7 +532,7 @@ class SeasonToDateFeatureStore:
         if cache_path.exists() and not rebuild:
             if self.cfg.verbose:
                 print(f"[cache] Loading team feature cache from {cache_path}")
-            self.feature_table = pd.read_pickle(cache_path)
+            self.feature_table = pd.read_pickle(cache_path, compression="gzip")
             self._build_lookup()
             return self.feature_table
 
@@ -578,13 +578,18 @@ class SeasonToDateFeatureStore:
         feature_table = pd.DataFrame(rows)
 
         if self.cfg.sort_cache_by_date:
-            feature_table = feature_table.sort_values(
-                ["season", "date", "team_id"]
-            ).reset_index(drop=True)
+            feature_table = feature_table.sort_values(["season", "date", "team_id"]).reset_index(drop=True)
+
+        feature_table["season"] = feature_table["season"].astype(np.int16)
+        feature_table["team_id"] = feature_table["team_id"].astype(np.int32)
+        for name in self.feature_names:
+            feature_table[name] = pd.to_numeric(
+                feature_table[name], errors="coerce"
+            ).fillna(0.0).astype(np.float32)
 
         if self.cfg.verbose:
             print(f"[cache] Saving team feature cache to {cache_path}")
-        feature_table.to_pickle(cache_path)
+        feature_table.to_pickle(cache_path, compression="gzip")
 
         self.feature_table = feature_table
         self._build_lookup()
@@ -639,7 +644,7 @@ def build_matchup_feature_frame(
     if cache_path.exists() and not rebuild:
         if feature_store.cfg.verbose:
             print(f"[cache] Loading matchup feature cache from {cache_path}")
-        return pd.read_pickle(cache_path)
+        return pd.read_pickle(cache_path, compression="gzip")
 
     if feature_store.cfg.verbose:
         print("[build] Creating matchup feature cache from scratch...")
@@ -674,7 +679,6 @@ def build_matchup_feature_frame(
         how="left",
     )
 
-    # Applied basic preprocessing appropriate to your modality (e.g., image resizing, text tokenization, handling missing values)
     fill_bar = tqdm(
         feature_names,
         total=len(feature_names),
@@ -683,9 +687,14 @@ def build_matchup_feature_frame(
         disable=not feature_store.cfg.verbose,
     )
     for name in fill_bar:
-        matchups[f"team1_{name}"] = matchups[f"team1_{name}"].fillna(0.0)
-        matchups[f"team2_{name}"] = matchups[f"team2_{name}"].fillna(0.0)
+        matchups[f"team1_{name}"] = pd.to_numeric(
+            matchups[f"team1_{name}"], errors="coerce"
+        ).fillna(0.0).astype(np.float32)
+        matchups[f"team2_{name}"] = pd.to_numeric(
+            matchups[f"team2_{name}"], errors="coerce"
+        ).fillna(0.0).astype(np.float32)
 
+    derived = {}
     make_bar = tqdm(
         feature_names,
         total=len(feature_names),
@@ -694,16 +703,30 @@ def build_matchup_feature_frame(
         disable=not feature_store.cfg.verbose,
     )
     for name in make_bar:
-        matchups[f"diff_{name}"] = matchups[f"team1_{name}"] - matchups[f"team2_{name}"]
-        matchups[f"sum_{name}"] = matchups[f"team1_{name}"] + matchups[f"team2_{name}"]
+        derived[f"diff_{name}"] = (
+            matchups[f"team1_{name}"] - matchups[f"team2_{name}"]
+        ).astype(np.float32)
+        derived[f"sum_{name}"] = (
+            matchups[f"team1_{name}"] + matchups[f"team2_{name}"]
+        ).astype(np.float32)
 
-    matchups["home_indicator"] = matchups["team1home"].astype(int) - matchups[
-        "team2home"
-    ].astype(int)
+    derived["home_indicator"] = (
+        matchups["team1home"].astype(np.float32) - matchups["team2home"].astype(np.float32)
+    ).astype(np.float32)
+
+    derived_df = pd.DataFrame(derived, index=matchups.index)
+    matchups = pd.concat([matchups, derived_df], axis=1).copy()
+
+    matchups["season"] = matchups["season"].astype(np.int16)
+    matchups["team1id"] = matchups["team1id"].astype(np.int32)
+    matchups["team2id"] = matchups["team2id"].astype(np.int32)
+    matchups["team1pts"] = matchups["team1pts"].astype(np.float32)
+    matchups["team2pts"] = matchups["team2pts"].astype(np.float32)
 
     if feature_store.cfg.verbose:
         print(f"[cache] Saving matchup feature cache to {cache_path}")
-    matchups.to_pickle(cache_path)
+    matchups.to_pickle(cache_path, compression="gzip")
+
     return matchups
 
 
@@ -739,14 +762,18 @@ class Standardizer:
         self.stds: Optional[pd.Series] = None
 
     def fit(self, df: pd.DataFrame, feature_cols: List[str]) -> None:
-        self.means = df[feature_cols].mean()
-        self.stds = df[feature_cols].std().replace(0, 1.0).fillna(1.0)
+        numeric = df[feature_cols].astype(np.float32)
+        self.means = numeric.mean().astype(np.float32)
+        self.stds = numeric.std().replace(0, 1.0).fillna(1.0).astype(np.float32)
 
     def transform(self, df: pd.DataFrame, feature_cols: List[str]) -> pd.DataFrame:
         if self.means is None or self.stds is None:
             raise ValueError("Standardizer must be fit before calling transform.")
+
         out = df.copy()
-        out.loc[:, feature_cols] = (out[feature_cols] - self.means) / self.stds
+        numeric = out[feature_cols].astype(np.float32)
+        scaled = ((numeric - self.means) / self.stds).astype(np.float32)
+        out[feature_cols] = scaled
         return out
 
     def fit_transform(self, df: pd.DataFrame, feature_cols: List[str]) -> pd.DataFrame:
@@ -885,8 +912,8 @@ def build_dataloaders(
 
 if __name__ == "__main__":
     cfg = FeatureConfig(
-        feature_cache_path="team_feature_cache.pkl",
-        matchup_cache_path="matchup_feature_cache.pkl",
+        feature_cache_path="team_feature_cache.pkl.gz",
+        matchup_cache_path="matchup_feature_cache.pkl.gz",
         decay_days=180,
         fta_weight=0.44,
         verbose=True,
