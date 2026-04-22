@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+import torch
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from basketball_model import BasketballScoreMLP, ModelConfig
+
+
+def _to_float_list(values):
+    if isinstance(values, dict):
+        return [float(v) for v in values.values()]
+    return [float(v) for v in values]
+
+
+def export_model(model_dir: str, output_dir: str) -> None:
+    model_dir_path = Path(model_dir)
+    output_dir_path = Path(output_dir)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+
+    metadata_path = model_dir_path / 'best_score_model_meta.json'
+    standardizer_path = model_dir_path / 'best_standardizer.pt'
+    weights_path = model_dir_path / 'best_score_model.pt'
+
+    print('[info] Loading trained model artifacts...')
+
+    with metadata_path.open('r', encoding='utf-8') as f:
+        metadata = json.load(f)
+
+    standardizer_blob = torch.load(standardizer_path, map_location='cpu')
+    model_config = ModelConfig(**metadata['model_config'])
+
+    model = BasketballScoreMLP(model_config)
+    state_dict = torch.load(weights_path, map_location='cpu')
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    dummy_x = torch.zeros(1, model_config.num_cont_features, dtype=torch.float32)
+    dummy_team1 = torch.zeros(1, dtype=torch.long)
+    dummy_team2 = torch.zeros(1, dtype=torch.long)
+
+    onnx_path = output_dir_path / 'model.onnx'
+    print('[info] Exporting ONNX model...')
+    torch.onnx.export(
+        model,
+        (dummy_x, dummy_team1, dummy_team2),
+        onnx_path,
+        input_names=['x_cont', 'team1_id', 'team2_id'],
+        output_names=['pred_scores'],
+        dynamic_axes={
+            'x_cont': {0: 'batch'},
+            'team1_id': {0: 'batch'},
+            'team2_id': {0: 'batch'},
+            'pred_scores': {0: 'batch'},
+        },
+        opset_version=17,
+        export_params=True,
+        external_data=False,
+    )
+
+    feature_cols = list(standardizer_blob['feature_cols'])
+
+    means_obj = standardizer_blob['means']
+    stds_obj = standardizer_blob['stds']
+
+    if hasattr(means_obj, 'reindex'):
+        means = [float(v) for v in means_obj.reindex(feature_cols).tolist()]
+    else:
+        means = _to_float_list(means_obj)
+
+    if hasattr(stds_obj, 'reindex'):
+        stds = [float(v) for v in stds_obj.reindex(feature_cols).tolist()]
+    else:
+        stds = _to_float_list(stds_obj)
+
+    frontend_metadata = {
+        'featureCols': feature_cols,
+        'means': means,
+        'stds': stds,
+        'teamIdToIndex': {str(k): int(v) for k, v in standardizer_blob['team_id_to_index'].items()},
+        'inputNames': ['x_cont', 'team1_id', 'team2_id'],
+        'outputNames': ['pred_scores'],
+        'modelConfig': metadata['model_config'],
+        'bestSplitRatio': metadata.get('best_split_ratio'),
+    }
+
+    model_meta_path = output_dir_path / 'model_meta.json'
+    with model_meta_path.open('w', encoding='utf-8') as f:
+        json.dump(frontend_metadata, f, indent=2)
+
+    print(f'[success] Wrote ONNX model to {onnx_path}')
+    print(f'[success] Wrote frontend metadata to {model_meta_path}')
+    print(f'[info] Exported {len(feature_cols)} continuous features')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Export the trained basketball model to ONNX for browser inference.')
+    parser.add_argument('--model-dir', default='model_outputs')
+    parser.add_argument('--output-dir', default='web/public/model')
+    args = parser.parse_args()
+    export_model(args.model_dir, args.output_dir)

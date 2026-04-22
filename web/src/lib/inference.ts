@@ -1,0 +1,87 @@
+import * as ort from 'onnxruntime-web'
+import { FrontendModelMetadata, IndexedGame, SeasonSnapshots } from '../types'
+
+let cachedSession: ort.InferenceSession | null = null
+
+export async function getInferenceSession(): Promise<ort.InferenceSession> {
+  if (cachedSession) return cachedSession
+  cachedSession = await ort.InferenceSession.create('./model/model.onnx', {
+    executionProviders: ['wasm'],
+  })
+  return cachedSession
+}
+
+function getSnapshotFeatures(snapshots: SeasonSnapshots, date: string, teamId: number): number[] {
+  const row = snapshots.rows.find((item) => item.date === date && item.teamId === teamId)
+  if (!row) throw new Error(`No snapshot found for team ${teamId} on ${date}`)
+  return row.features
+}
+
+function featureMap(featureNames: string[], featureValues: number[]): Record<string, number> {
+  const out: Record<string, number> = {}
+  featureNames.forEach((name, i) => {
+    out[name] = featureValues[i] ?? 0
+  })
+  return out
+}
+
+function buildContinuousVector(
+  game: IndexedGame,
+  snapshots: SeasonSnapshots,
+  metadata: FrontendModelMetadata,
+): Float32Array {
+  const team1Raw = featureMap(snapshots.featureNames, getSnapshotFeatures(snapshots, game.date, game.team1.id))
+  const team2Raw = featureMap(snapshots.featureNames, getSnapshotFeatures(snapshots, game.date, game.team2.id))
+
+  const lookup: Record<string, number> = {}
+  Object.entries(team1Raw).forEach(([name, value]) => { lookup[`team1_${name}`] = value })
+  Object.entries(team2Raw).forEach(([name, value]) => { lookup[`team2_${name}`] = value })
+  Object.keys(team1Raw).forEach((name) => {
+    lookup[`diff_${name}`] = (team1Raw[name] ?? 0) - (team2Raw[name] ?? 0)
+    lookup[`sum_${name}`] = (team1Raw[name] ?? 0) + (team2Raw[name] ?? 0)
+  })
+  lookup['home_indicator'] = Number(game.team1.home) - Number(game.team2.home)
+
+  const values = metadata.featureCols.map((feature) => {
+    const raw = lookup[feature] ?? 0
+    const mean = metadata.means[feature] ?? 0
+    const std = metadata.stds[feature] ?? 1
+    return std === 0 ? 0 : (raw - mean) / std
+  })
+
+  return Float32Array.from(values)
+}
+
+export async function predictHistoricalGame(
+  game: IndexedGame,
+  snapshots: SeasonSnapshots,
+  metadata: FrontendModelMetadata,
+): Promise<{ team1Score: number; team2Score: number; predictedWinnerTeamId: number }> {
+  const session = await getInferenceSession()
+  const xCont = buildContinuousVector(game, snapshots, metadata)
+  const team1Idx = metadata.teamIdToIndex[String(game.team1.id)]
+  const team2Idx = metadata.teamIdToIndex[String(game.team2.id)]
+  if (team1Idx === undefined || team2Idx === undefined) {
+    throw new Error('A selected team is missing from the saved team embedding index.')
+  }
+
+  const feeds: Record<string, ort.Tensor> = {
+    x_cont: new ort.Tensor('float32', xCont, [1, xCont.length]),
+    team1_id: new ort.Tensor('int64', BigInt64Array.from([BigInt(team1Idx)]), [1]),
+    team2_id: new ort.Tensor('int64', BigInt64Array.from([BigInt(team2Idx)]), [1]),
+  }
+
+  const results = await session.run(feeds)
+  const output = results.pred_scores
+  if (!output) throw new Error('Model output pred_scores was missing.')
+
+  const data = Array.from(output.data as Iterable<number>)
+  const team1Score = Number(data[0])
+  const team2Score = Number(data[1])
+
+  return {
+    team1Score,
+    team2Score,
+    predictedWinnerTeamId: team1Score >= team2Score ? game.team1.id : game.team2.id,
+  }
+}

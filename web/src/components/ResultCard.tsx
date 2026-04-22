@@ -1,0 +1,30 @@
+import { IndexedGame, TeamMap } from '../types'
+
+export function ResultCard({
+  game,
+  prediction,
+  teams,
+}: {
+  game: IndexedGame | null
+  prediction: { team1Score: number; team2Score: number; predictedWinnerTeamId: number } | null
+  teams: TeamMap
+}) {
+  if (!game || !prediction) return null
+
+  const predictedWinner = teams[String(prediction.predictedWinnerTeamId)]?.displayName ?? String(prediction.predictedWinnerTeamId)
+  const actualWinner = teams[String(game.winnerTeamId)]?.displayName ?? String(game.winnerTeamId)
+  const correct = prediction.predictedWinnerTeamId === game.winnerTeamId
+
+  return (
+    <div style={{ background: 'white', padding: 18, borderRadius: 16, boxShadow: '0 10px 25px rgba(0,0,0,0.08)' }}>
+      <h3 style={{ marginTop: 0 }}>Prediction Result</h3>
+      <p><strong>Date:</strong> {game.date}</p>
+      <p><strong>Matchup:</strong> {game.team1.name} vs {game.team2.name}</p>
+      <p><strong>Predicted Score:</strong> {prediction.team1Score.toFixed(1)} – {prediction.team2Score.toFixed(1)}</p>
+      <p><strong>Predicted Winner:</strong> {predictedWinner}</p>
+      <p><strong>Actual Score:</strong> {game.team1.score} – {game.team2.score}</p>
+      <p><strong>Actual Winner:</strong> {actualWinner}</p>
+      <p><strong>Was the winner prediction correct?</strong> {correct ? 'Yes' : 'No'}</p>
+    </div>
+  )
+}

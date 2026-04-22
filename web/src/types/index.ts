@@ -1,0 +1,48 @@
+export type TeamMapEntry = {
+  id: number;
+  displayName: string;
+  shortName: string;
+  abbreviation: string;
+  nickname?: string | null;
+  location?: string | null;
+  conference?: string | null;
+};
+
+export type TeamMap = Record<string, TeamMapEntry>;
+
+export type IndexedGame = {
+  gameKey: string;
+  season: number;
+  date: string;
+  team1: { id: number; name: string; abbreviation: string; home: boolean; score: number };
+  team2: { id: number; name: string; abbreviation: string; home: boolean; score: number };
+  site: 'neutral' | 'team1_home' | 'team2_home';
+  winnerTeamId: number;
+};
+
+export type SeasonGames = {
+  season: number;
+  games: IndexedGame[];
+};
+
+export type SeasonSnapshots = {
+  season: number;
+  featureNames: string[];
+  rows: Array<{ date: string; teamId: number; features: number[] }>;
+};
+
+export type FrontendModelMetadata = {
+  featureCols: string[];
+  means: Record<string, number>;
+  stds: Record<string, number>;
+  teamIdToIndex: Record<string, number>;
+  modelConfig: Record<string, unknown>;
+  bestSplitRatio: [number, number, number];
+};
+
+export type LogEntry = {
+  id: string;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+  timestamp: string;
+};

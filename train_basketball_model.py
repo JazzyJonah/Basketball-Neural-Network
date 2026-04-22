@@ -255,7 +255,7 @@ def save_best_artifacts(
     output_dir: Path,
 ) -> None:
     weights_path = output_dir / "best_score_model.pt"
-    metadata_path = output_dir / "best_score_model_metadata.json"
+    metadata_path = output_dir / "best_score_model_meta.json"
     standardizer_path = output_dir / "best_standardizer.pt"
 
     torch.save(model.state_dict(), weights_path)
@@ -471,7 +471,7 @@ def main() -> None:
         print("Best experiment:")
         print(best_payload["experiment_name"])
         print(f"Saved weights to: {output_dir / 'best_score_model.pt'}")
-        print(f"Saved metadata to: {output_dir / 'best_score_model_metadata.json'}")
+        print(f"Saved metadata to: {output_dir / 'best_score_model_meta.json'}")
 
     print(f"[plots] Training curves and comparison charts saved under: {plots_dir}")
     print("Finished. Results written to model_outputs/experiment_results.csv")

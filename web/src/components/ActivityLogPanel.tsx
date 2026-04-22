@@ -1,0 +1,19 @@
+import { LogEntry } from '../types'
+
+export function ActivityLogPanel({ logs }: { logs: LogEntry[] }) {
+  return (
+    <div style={{ background: '#111827', color: '#f9fafb', padding: 16, borderRadius: 16, minHeight: 220 }}>
+      <h3 style={{ marginTop: 0 }}>Activity Log</h3>
+      <div style={{ display: 'grid', gap: 8, fontFamily: 'monospace', fontSize: 12, maxHeight: 320, overflow: 'auto' }}>
+        {logs.length === 0 ? <div>No activity yet.</div> : logs.map((log) => (
+          <div key={log.id}>
+            <span style={{ color: log.level === 'error' ? '#fca5a5' : log.level === 'warn' ? '#fde68a' : '#93c5fd' }}>
+              [{log.level.toUpperCase()}]
+            </span>{' '}
+            {log.timestamp} — {log.message}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}

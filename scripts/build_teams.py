@@ -1,0 +1,47 @@
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import pandas as pd
+import sportsdataverse.mbb as mbb
+from tqdm.auto import tqdm
+
+
+def build_teams_json(output_path: str) -> None:
+    print('[info] Fetching ESPN team metadata...')
+    teams = mbb.espn_mbb_teams(groups=50, return_as_pandas=True)
+    if not isinstance(teams, pd.DataFrame):
+        teams = pd.DataFrame(teams)
+
+    required = ['team_id', 'team_display_name', 'team_short_display_name', 'team_abbreviation']
+    missing = [c for c in required if c not in teams.columns]
+    if missing:
+        raise ValueError(f'Missing expected team columns: {missing}. Available: {teams.columns.tolist()}')
+
+    payload = {}
+    for row in tqdm(teams.itertuples(index=False), total=len(teams), desc='Building teams.json', unit='team'):
+        team_id = int(getattr(row, 'team_id'))
+        payload[str(team_id)] = {
+            'id': team_id,
+            'displayName': getattr(row, 'team_display_name'),
+            'shortName': getattr(row, 'team_short_display_name'),
+            'abbreviation': getattr(row, 'team_abbreviation'),
+            'nickname': getattr(row, 'team_nickname', None),
+            'location': getattr(row, 'team_location', None),
+            'conference': None,
+        }
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open('w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    print(f'[success] Wrote {len(payload)} teams to {output}')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Build teams.json for the historical viewer.')
+    parser.add_argument('--output', default='web/public/data/teams.json')
+    args = parser.parse_args()
+    build_teams_json(args.output)
