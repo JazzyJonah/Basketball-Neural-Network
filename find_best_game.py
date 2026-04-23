@@ -1,0 +1,254 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+
+from basketball_model import BasketballScoreMLP, ModelConfig
+from season_features import (
+    BasketballMatchupDataset,
+    FeatureConfig,
+    SeasonToDateFeatureStore,
+    build_matchup_feature_frame,
+    build_team_id_index,
+    get_continuous_feature_columns,
+    load_games_csv,
+)
+
+
+def get_device() -> torch.device:
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def load_team_lookup(teams_json_path: str = "web/public/data/teams.json") -> Dict[int, str]:
+    path = Path(teams_json_path)
+    if not path.exists():
+        return {}
+
+    with path.open("r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    lookup: Dict[int, str] = {}
+    if isinstance(raw, dict):
+        for _, value in raw.items():
+            try:
+                team_id = int(value["id"])
+                display_name = (
+                    value.get("displayName")
+                    or value.get("shortName")
+                    or value.get("abbreviation")
+                    or f"Team {team_id}"
+                )
+                lookup[team_id] = display_name
+            except Exception:
+                continue
+    return lookup
+
+
+def format_matchup(row: pd.Series, team_lookup: Dict[int, str]) -> str:
+    team1_name = team_lookup.get(int(row["team1id"]), f"Team {int(row['team1id'])}")
+    team2_name = team_lookup.get(int(row["team2id"]), f"Team {int(row['team2id'])}")
+
+    neutral = (not bool(row["team1home"])) and (not bool(row["team2home"]))
+    if neutral:
+        return f"{team1_name} vs {team2_name}"
+    if bool(row["team1home"]):
+        return f"{team2_name} @ {team1_name}"
+    return f"{team1_name} @ {team2_name}"
+
+
+def format_score_line(
+    team1_name: str,
+    team2_name: str,
+    team1_score: float,
+    team2_score: float,
+    team1_home: bool,
+    team2_home: bool,
+) -> str:
+    neutral = (not team1_home) and (not team2_home)
+    if neutral or team1_home:
+        return f"{team1_name} {team1_score:.1f} - {team2_name} {team2_score:.1f}"
+    return f"{team2_name} {team2_score:.1f} - {team1_name} {team1_score:.1f}"
+
+
+def build_full_dataset(
+    csv_path: str,
+    feature_cache_path: str,
+    matchup_cache_path: str,
+    means: pd.Series,
+    stds: pd.Series,
+) -> Tuple[pd.DataFrame, BasketballMatchupDataset, List[str], Dict[int, int]]:
+    feature_config = FeatureConfig(
+        feature_cache_path=feature_cache_path,
+        matchup_cache_path=matchup_cache_path,
+        verbose=True,
+    )
+
+    print("[info] Loading games and cached features...")
+    games_df = load_games_csv(csv_path)
+    store = SeasonToDateFeatureStore(games_df, cfg=feature_config)
+    matchups_df = build_matchup_feature_frame(games_df, store, rebuild=False)
+
+    feature_cols = get_continuous_feature_columns(matchups_df)
+    team_id_to_index = build_team_id_index(games_df)
+
+    full_df = matchups_df.copy()
+
+    mean_series = means.reindex(feature_cols).astype(np.float32)
+    std_series = stds.reindex(feature_cols).replace(0, 1.0).fillna(1.0).astype(np.float32)
+
+    full_df.loc[:, feature_cols] = (
+        full_df[feature_cols].astype(np.float32) - mean_series
+    ) / std_series
+
+    dataset = BasketballMatchupDataset(full_df, feature_cols, team_id_to_index)
+    return full_df, dataset, feature_cols, team_id_to_index
+
+
+def predict_all_games(
+    model: BasketballScoreMLP,
+    dataset: BasketballMatchupDataset,
+    batch_size: int,
+) -> np.ndarray:
+    device = get_device()
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    model.eval()
+    preds: List[np.ndarray] = []
+
+    with torch.no_grad():
+        for batch in tqdm(loader, desc="Predicting all games", unit="batch"):
+            x = batch["x"].to(device, non_blocking=True)
+            team1_id = batch["team1_id"].to(device, non_blocking=True)
+            team2_id = batch["team2_id"].to(device, non_blocking=True)
+
+            pred = model(x, team1_id, team2_id)
+            preds.append(pred.cpu().numpy())
+
+    return np.vstack(preds)
+
+
+def compute_game_scores(full_df: pd.DataFrame, preds: np.ndarray) -> pd.DataFrame:
+    out = full_df.copy()
+
+    out["pred_team1pts"] = preds[:, 0]
+    out["pred_team2pts"] = preds[:, 1]
+
+    out["team1_diff"] = out["pred_team1pts"] - out["team1pts"]
+    out["team2_diff"] = out["pred_team2pts"] - out["team2pts"]
+
+    actual_spread = out["team1pts"] - out["team2pts"]
+    pred_spread = out["pred_team1pts"] - out["pred_team2pts"]
+    out["spread_diff"] = pred_spread - actual_spread
+
+    out["score"] = np.sqrt(
+        (
+            np.square(out["team1_diff"])
+            + np.square(out["team2_diff"])
+            + np.square(out["spread_diff"])
+        ) / 3.0
+    )
+
+    return out
+
+
+def main() -> None:
+    model_dir = Path("model_outputs")
+    weights_path = model_dir / "best_score_model.pt"
+    metadata_path = model_dir / "best_score_model_meta.json"
+    standardizer_path = model_dir / "best_standardizer.pt"
+
+    if not weights_path.exists():
+        raise FileNotFoundError(f"Missing model weights: {weights_path}")
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"Missing model metadata: {metadata_path}")
+    if not standardizer_path.exists():
+        raise FileNotFoundError(f"Missing standardizer: {standardizer_path}")
+
+    print("[info] Loading model metadata...")
+    with metadata_path.open("r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    print("[info] Loading saved standardizer...")
+    standardizer_blob = torch.load(standardizer_path, map_location="cpu")
+    means = pd.Series(standardizer_blob["means"], dtype=np.float32)
+    stds = pd.Series(standardizer_blob["stds"], dtype=np.float32)
+
+    full_df, dataset, _, _ = build_full_dataset(
+        csv_path="mbb_games.csv",
+        feature_cache_path="team_feature_cache.pkl.gz",
+        matchup_cache_path="matchup_feature_cache.pkl.gz",
+        means=means,
+        stds=stds,
+    )
+
+    print("[info] Building model...")
+    model_config = ModelConfig(**metadata["model_config"])
+    model = BasketballScoreMLP(model_config)
+    state_dict = torch.load(weights_path, map_location="cpu")
+    model.load_state_dict(state_dict)
+    model.to(get_device())
+
+    batch_size = metadata.get("train_config", {}).get("batch_size", 512)
+    batch_size = max(int(batch_size), 256)
+
+    preds = predict_all_games(model, dataset, batch_size=batch_size)
+    scored_df = compute_game_scores(full_df, preds)
+
+    best_idx = scored_df["score"].idxmin()
+    best_row = scored_df.loc[best_idx]
+
+    team_lookup = load_team_lookup()
+
+    team1_name = team_lookup.get(int(best_row["team1id"]), f"Team {int(best_row['team1id'])}")
+    team2_name = team_lookup.get(int(best_row["team2id"]), f"Team {int(best_row['team2id'])}")
+
+    print("\n=== Best-predicted game in the database ===")
+    print(f"Date: {pd.Timestamp(best_row['date']).date()}")
+    print(f"Season: {int(best_row['season'])}")
+    print(f"Matchup: {format_matchup(best_row, team_lookup)}")
+    print(
+        "Actual: "
+        + format_score_line(
+            team1_name,
+            team2_name,
+            float(best_row["team1pts"]),
+            float(best_row["team2pts"]),
+            bool(best_row["team1home"]),
+            bool(best_row["team2home"]),
+        )
+    )
+    print(
+        "Predicted: "
+        + format_score_line(
+            team1_name,
+            team2_name,
+            float(best_row["pred_team1pts"]),
+            float(best_row["pred_team2pts"]),
+            bool(best_row["team1home"]),
+            bool(best_row["team2home"]),
+        )
+    )
+    print(f"Score (RMSE over team1/team2/spread): {float(best_row['score']):.4f}")
+    print(f"Team 1 diff: {float(best_row['team1_diff']):+.4f}")
+    print(f"Team 2 diff: {float(best_row['team2_diff']):+.4f}")
+    print(f"Spread diff: {float(best_row['spread_diff']):+.4f}")
+
+    out_path = model_dir / "best_game_by_score.csv"
+    scored_df.sort_values("score", ascending=True).head(100).to_csv(out_path, index=False)
+    print(f"\n[done] Wrote top 100 best-predicted games to {out_path}")
+
+
+if __name__ == "__main__":
+    main()
