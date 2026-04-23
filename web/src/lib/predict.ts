@@ -75,6 +75,9 @@ function normalizeModelMeta(raw: RawModelMeta): ModelMeta {
   if (!means.length || !stds.length) {
     throw new Error('model_meta.json is missing means/stds');
   }
+  if (!featureCols.length) {
+    throw new Error('model_meta.json is missing featureCols/feature_cols');
+  }
 
   return {
     teamIdToIndex,
@@ -162,6 +165,53 @@ function resolveInputNames(session: ort.InferenceSession, meta: ModelMeta) {
   return { contName, team1Name, team2Name };
 }
 
+function buildNamedRawFeatureMap(
+  snapshotSeason: SnapshotSeasonFile,
+  team1: SnapshotRow,
+  team2: SnapshotRow,
+  homeIndicator: number
+): Record<string, number> {
+  const names = snapshotSeason.featureNames;
+
+  if (team1.features.length !== names.length || team2.features.length !== names.length) {
+    throw new Error(
+      `Snapshot feature length mismatch: names=${names.length}, team1=${team1.features.length}, team2=${team2.features.length}`
+    );
+  }
+
+  const featureMap: Record<string, number> = {};
+
+  for (let i = 0; i < names.length; i++) {
+    const baseName = names[i];
+    const t1 = team1.features[i];
+    const t2 = team2.features[i];
+
+    featureMap[`team1_${baseName}`] = t1;
+    featureMap[`team2_${baseName}`] = t2;
+    featureMap[`diff_${baseName}`] = t1 - t2;
+    featureMap[`sum_${baseName}`] = t1 + t2;
+  }
+
+  featureMap['home_indicator'] = homeIndicator;
+
+  return featureMap;
+}
+
+function buildOrderedRawVector(
+  meta: ModelMeta,
+  featureMap: Record<string, number>
+): Float32Array {
+  const values = meta.featureCols.map((name) => {
+    const value = featureMap[name];
+    if (value === undefined) {
+      throw new Error(`Missing feature "${name}" while assembling browser inference vector`);
+    }
+    return value;
+  });
+
+  return new Float32Array(values);
+}
+
 export async function predictHistoricalGame(inputs: PredictInputs): Promise<PredictResult> {
   const [session, meta, snapshotSeason] = await Promise.all([
     getSession(),
@@ -184,20 +234,14 @@ export async function predictHistoricalGame(inputs: PredictInputs): Promise<Pred
     );
   }
 
-  if (team1.features.length !== team2.features.length) {
-    throw new Error('Team feature lengths do not match');
-  }
+  const rawFeatureMap = buildNamedRawFeatureMap(
+    snapshotSeason,
+    team1,
+    team2,
+    inputs.homeIndicator
+  );
 
-  const diff = team1.features.map((v, i) => v - team2.features[i]);
-  const sum = team1.features.map((v, i) => v + team2.features[i]);
-
-  const xContRaw = new Float32Array([
-    ...team1.features,
-    ...team2.features,
-    ...diff,
-    ...sum,
-    inputs.homeIndicator,
-  ]);
+  const xContRaw = buildOrderedRawVector(meta, rawFeatureMap);
 
   if (hasBadValues(xContRaw)) {
     throw new Error('Raw input feature vector contains invalid or extremely large values');
@@ -223,10 +267,8 @@ export async function predictHistoricalGame(inputs: PredictInputs): Promise<Pred
 
   console.log('team1 snapshot:', team1);
   console.log('team2 snapshot:', team2);
-  console.log('raw feature lengths:', {
-    team1: team1.features.length,
-    team2: team2.features.length,
-  });
+  console.log('snapshot feature names:', snapshotSeason.featureNames);
+  console.log('meta feature cols (first 20):', meta.featureCols.slice(0, 20));
   console.log('raw xCont preview:', Array.from(xContRaw.slice(0, 20)));
   console.log('standardized xCont preview:', Array.from(xCont.slice(0, 20)));
   console.log('homeIndicator:', inputs.homeIndicator);
