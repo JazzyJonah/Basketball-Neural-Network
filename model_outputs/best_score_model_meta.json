@@ -27,9 +27,9 @@
     "seed": 42
   },
   "best_split_ratio": [
-    0.8,
-    0.1,
-    0.1
+    0.7,
+    0.15,
+    0.15
   ],
   "weights_path": "model_outputs\\best_score_model.pt",
   "standardizer_path": "model_outputs\\best_standardizer.pt"

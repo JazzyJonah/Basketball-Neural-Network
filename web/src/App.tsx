@@ -95,6 +95,7 @@ export default function App() {
   const [teams, setTeams] = useState<TeamMap>({});
   const [games, setGames] = useState<GameRecord[]>([]);
   const [selectedSeason, setSelectedSeason] = useState<string>('');
+  const [selectedTeamId, setSelectedTeamId] = useState<string>('');
   const [selectedGameId, setSelectedGameId] = useState<string>('');
   const [prediction, setPrediction] = useState<PredictionResult | null>(null);
   const [loadingPrediction, setLoadingPrediction] = useState(false);
@@ -125,11 +126,7 @@ export default function App() {
 
         const seasons = [...new Set(gameData.map((g) => g.season))].sort((a, b) => b - a);
         if (seasons.length > 0) {
-          const firstSeason = String(seasons[0]);
-          setSelectedSeason(firstSeason);
-
-          const firstGame = gameData.find((g) => String(g.season) === firstSeason);
-          if (firstGame) setSelectedGameId(firstGame.id);
+          setSelectedSeason(String(seasons[0]));
         }
 
         addLog('info', `Loaded ${Object.keys(teamData).length} teams`);
@@ -154,21 +151,47 @@ export default function App() {
     [games, selectedSeason]
   );
 
+  const teamOptions = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const game of seasonGames) {
+      map.set(game.team1Id, game.team1Name);
+      map.set(game.team2Id, game.team2Name);
+    }
+    return [...map.entries()]
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [seasonGames]);
+
+  const filteredGames = useMemo(() => {
+    if (!selectedTeamId) return seasonGames;
+    const tid = Number(selectedTeamId);
+    return seasonGames.filter((g) => g.team1Id === tid || g.team2Id === tid);
+  }, [seasonGames, selectedTeamId]);
+
   const selectedGame = useMemo(
-    () => seasonGames.find((game) => game.id === selectedGameId) ?? null,
-    [seasonGames, selectedGameId]
+    () => filteredGames.find((game) => game.id === selectedGameId) ?? null,
+    [filteredGames, selectedGameId]
   );
 
   useEffect(() => {
-    if (seasonGames.length > 0) {
+    if (teamOptions.length > 0 && selectedTeamId) {
+      const exists = teamOptions.some((t) => String(t.id) === selectedTeamId);
+      if (!exists) {
+        setSelectedTeamId('');
+      }
+    }
+  }, [teamOptions, selectedTeamId]);
+
+  useEffect(() => {
+    if (filteredGames.length > 0) {
       setSelectedGameId((prev) => {
-        const exists = seasonGames.some((g) => g.id === prev);
-        return exists ? prev : seasonGames[0].id;
+        const exists = filteredGames.some((g) => g.id === prev);
+        return exists ? prev : filteredGames[0].id;
       });
     } else {
       setSelectedGameId('');
     }
-  }, [seasonGames]);
+  }, [filteredGames]);
 
   useEffect(() => {
     setPrediction(null);
@@ -217,7 +240,7 @@ export default function App() {
           <p className="eyebrow">Historical Game Predictor</p>
           <h1>NCAA men&apos;s basketball backtest viewer</h1>
           <p className="hero-subtitle">
-            Select a season, then a completed game, and predict it using only information available before tipoff.
+            Select a season, optionally filter by team, then choose a completed game.
           </p>
         </div>
       </header>
@@ -241,15 +264,31 @@ export default function App() {
             ))}
           </select>
 
-          <label className="field-label" htmlFor="game-select">Completed game</label>
+          <label className="field-label" htmlFor="team-select">Team filter (optional)</label>
+          <select
+            id="team-select"
+            className="input"
+            value={selectedTeamId}
+            onChange={(e) => setSelectedTeamId(e.target.value)}
+            disabled={loadingData || teamOptions.length === 0}
+          >
+            <option value="">All teams</option>
+            {teamOptions.map((team) => (
+              <option key={team.id} value={String(team.id)}>
+                {team.name}
+              </option>
+            ))}
+          </select>
+
+          <label className="field-label" htmlFor="game-select">Matchup</label>
           <select
             id="game-select"
             className="input"
             value={selectedGameId}
             onChange={(e) => setSelectedGameId(e.target.value)}
-            disabled={loadingData || seasonGames.length === 0}
+            disabled={loadingData || filteredGames.length === 0}
           >
-            {seasonGames.map((game) => (
+            {filteredGames.map((game) => (
               <option key={game.id} value={game.id}>
                 {game.date} — {formatMatchup(game)}
               </option>

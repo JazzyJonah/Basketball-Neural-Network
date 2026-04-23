@@ -114,6 +114,8 @@ def get_device() -> torch.device:
         print("CUDA AVAILABLE")
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+def is_finite_tensor(t: torch.Tensor) -> bool:
+    return bool(torch.isfinite(t).all().item())
 
 def run_epoch(
     model: BasketballScoreMLP,
@@ -123,6 +125,7 @@ def run_epoch(
     device: torch.device,
     l1_lambda: float,
     train: bool,
+    grad_clip_norm: float | None = 1.0,
 ) -> Tuple[float, np.ndarray, np.ndarray]:
     model.train(mode=train)
     losses: List[float] = []
@@ -130,7 +133,7 @@ def run_epoch(
     trues: List[np.ndarray] = []
 
     bar = tqdm(loader, desc="Train" if train else "Eval", leave=False, unit="batch")
-    for batch in bar:
+    for batch_idx, batch in enumerate(bar):
         x = batch["x"].to(device)
         team1_id = batch["team1_id"].to(device)
         team2_id = batch["team2_id"].to(device)
@@ -140,18 +143,41 @@ def run_epoch(
             pred = model(x, team1_id, team2_id)
             loss = criterion(pred, y)
 
-            # Applied regularization techniques to prevent overfitting (at least two of: L1/L2 penalty, dropout, early stopping) (5 pts)
             if train and l1_lambda > 0:
                 loss = loss + (l1_lambda * l1_penalty(model))
+
+            if not torch.isfinite(loss):
+                raise RuntimeError(
+                    f"Non-finite loss detected in {'train' if train else 'eval'} "
+                    f"at batch {batch_idx}: {loss.detach().cpu().item()}"
+                )
 
             if train:
                 optimizer.zero_grad()
                 loss.backward()
+
+                for name, param in model.named_parameters():
+                    if param.grad is not None and not is_finite_tensor(param.grad):
+                        raise RuntimeError(f"Non-finite gradient detected for parameter: {name}")
+
+                if grad_clip_norm is not None and grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+
                 optimizer.step()
 
-        losses.append(float(loss.detach().cpu().item()))
-        preds.append(pred.detach().cpu().numpy())
-        trues.append(y.detach().cpu().numpy())
+        loss_value = float(loss.detach().cpu().item())
+        if not np.isfinite(loss_value):
+            raise RuntimeError(f"Non-finite scalar loss detected: {loss_value}")
+
+        pred_np = pred.detach().cpu().numpy()
+        y_np = y.detach().cpu().numpy()
+
+        if not np.isfinite(pred_np).all():
+            raise RuntimeError(f"Non-finite prediction values detected at batch {batch_idx}")
+
+        losses.append(loss_value)
+        preds.append(pred_np)
+        trues.append(y_np)
         bar.set_postfix(loss=f"{np.mean(losses):.4f}")
 
     return float(np.mean(losses)), np.vstack(preds), np.vstack(trues)
@@ -192,6 +218,7 @@ def train_single_model(
             device=device,
             l1_lambda=train_config.l1_lambda,
             train=True,
+            grad_clip_norm=1.0,
         )
         val_loss, _, _ = run_epoch(
             model=model,
@@ -304,8 +331,26 @@ def resolve_rebuild_setting(feature_config: FeatureConfig, requested_rebuild: bo
 
     return False
 
+def merge_experiment_rows(
+    existing_csv_path: Path,
+    new_rows: List[Dict[str, float | str]],
+) -> pd.DataFrame:
+    if existing_csv_path.exists():
+        existing = pd.read_csv(existing_csv_path)
+    else:
+        existing = pd.DataFrame()
 
-def main() -> None:
+    new_df = pd.DataFrame(new_rows)
+
+    if not existing.empty and "experiment_name" in existing.columns:
+        existing = existing[~existing["experiment_name"].isin(new_df["experiment_name"])].copy()
+
+    merged = pd.concat([existing, new_df], ignore_index=True)
+    merged = merged.sort_values(["mse", "winner_accuracy"], ascending=[True, False]).reset_index(drop=True)
+    return merged
+
+def main(only_optimizers: List[str] | None = None) -> None:
+    optimizer_options = only_optimizers or ["sgd", "adam", "adamw"]
     output_dir = Path("model_outputs")
     plots_dir = output_dir / "plots"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -343,7 +388,6 @@ def main() -> None:
         (0.70, 0.15, 0.15),
         (0.80, 0.10, 0.10),
     ]
-    optimizer_options = ["sgd", "adam", "adamw"]
 
     results: List[Dict[str, float | str]] = []
     best_test_mse = float("inf")
@@ -377,6 +421,20 @@ def main() -> None:
         for optimizer_name in optimizer_options:
             current_train_config = TrainConfig(**asdict(train_config))
             current_train_config.optimizer_name = optimizer_name
+
+            if optimizer_name == "sgd":
+                current_train_config.learning_rate = 5e-3
+                current_train_config.scheduler_name = "step"
+                current_train_config.scheduler_step_size = 10
+                current_train_config.scheduler_gamma = 0.5
+                current_train_config.weight_decay = 1e-4
+                current_train_config.l1_lambda = 1e-6
+            elif optimizer_name == "adam":
+                current_train_config.learning_rate = 1e-3
+                current_train_config.scheduler_name = "reduce_on_plateau"
+            elif optimizer_name == "adamw":
+                current_train_config.learning_rate = 1e-3
+                current_train_config.scheduler_name = "reduce_on_plateau"
 
             model_config = ModelConfig(
                 num_cont_features=len(runner.feature_cols),
@@ -428,6 +486,10 @@ def main() -> None:
 
     results_df = pd.DataFrame(results)
     results_df = results_df.sort_values(["mse", "winner_accuracy"], ascending=[True, False]).reset_index(drop=True)
+    results_df = merge_experiment_rows(
+        output_dir / "experiment_results.csv",
+        results,
+    )
     results_df.to_csv(output_dir / "experiment_results.csv", index=False)
 
     plot_metric_bars(
@@ -456,14 +518,14 @@ def main() -> None:
         )
 
         plot_actual_vs_predicted(
-            best_payload["y_true"],
             best_payload["y_pred"],
+            best_payload["y_true"],
             str(plots_dir / "best_model_actual_vs_predicted_total.png"),
             title=f"Actual vs Predicted Total Points - {best_payload['experiment_name']}",
         )
         plot_margin_residuals(
-            best_payload["y_true"],
             best_payload["y_pred"],
+            best_payload["y_true"],
             str(plots_dir / "best_model_margin_residuals.png"),
             title=f"Margin Residuals - {best_payload['experiment_name']}",
         )
@@ -478,4 +540,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(only_optimizers=[])

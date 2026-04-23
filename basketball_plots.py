@@ -6,6 +6,7 @@ from typing import Dict, List
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 
 # Tracked and visualized training curves showing loss and/or metrics over time (3 pts)
@@ -41,26 +42,36 @@ def plot_metric_bars(results_df: pd.DataFrame, metric: str, output_path: str, ti
     plt.close()
 
 
-def plot_actual_vs_predicted(y_true: np.ndarray, y_pred: np.ndarray, output_path: str, title: str) -> None:
+def plot_actual_vs_predicted(y_pred: np.ndarray, y_true: np.ndarray, output_path: str, title: str) -> None:
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    true_total = y_true[:, 0] + y_true[:, 1]
     pred_total = y_pred[:, 0] + y_pred[:, 1]
+    true_total = y_true[:, 0] + y_true[:, 1]
 
     plt.figure(figsize=(7, 7))
-    plt.scatter(true_total, pred_total, alpha=0.35)
-    min_val = min(true_total.min(), pred_total.min())
-    max_val = max(true_total.max(), pred_total.max())
-    plt.plot([min_val, max_val], [min_val, max_val])
-    plt.xlabel("Actual Total Points")
-    plt.ylabel("Predicted Total Points")
+    plt.scatter(pred_total, true_total, alpha=0.03)
+    
+    # Add best fit line
+    slope, intercept, r_value, _, _ = stats.linregress(pred_total, true_total)
+    line_x = np.array([pred_total.min(), pred_total.max()])
+    line_y = slope * line_x + intercept
+    plt.plot(line_x, line_y, color='red', linewidth=2, label=f'Best fit: y = {slope:.3f}x + {intercept:.3f}')
+    
+    # Add R^2 text
+    r_squared = r_value**2
+    plt.text(0.05, 0.95, f'R² = {r_squared:.3f}', transform=plt.gca().transAxes, 
+             fontsize=12, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    plt.xlabel("Predicted Total Points")
+    plt.ylabel("Actual Total Points")
     plt.title(title)
+    plt.legend()
     plt.tight_layout()
     plt.savefig(output_path, dpi=200)
     plt.close()
 
 
-def plot_margin_residuals(y_true: np.ndarray, y_pred: np.ndarray, output_path: str, title: str) -> None:
+def plot_margin_residuals(y_pred: np.ndarray, y_true: np.ndarray, output_path: str, title: str) -> None:
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     true_margin = y_true[:, 0] - y_true[:, 1]

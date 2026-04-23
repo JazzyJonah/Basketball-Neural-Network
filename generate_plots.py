@@ -1,0 +1,189 @@
+import json
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader
+
+from basketball_model import BasketballScoreMLP, ModelConfig, TrainConfig, set_seed
+from basketball_plots import plot_actual_vs_predicted, plot_metric_bars
+from season_features import (
+    BasketballMatchupDataset,
+    FeatureConfig,
+    SeasonToDateFeatureStore,
+    Standardizer,
+    build_matchup_feature_frame,
+    build_team_id_index,
+    chronological_split,
+    get_continuous_feature_columns,
+    load_games_csv,
+)
+
+
+class ExperimentRunner:
+    def __init__(
+        self,
+        csv_path: str = "mbb_games.csv",
+        output_dir: str = "model_outputs",
+        feature_config: FeatureConfig | None = None,
+        train_config: TrainConfig | None = None,
+    ):
+        self.csv_path = csv_path
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.feature_config = feature_config or FeatureConfig(verbose=True)
+        self.train_config = train_config or TrainConfig()
+        set_seed(self.train_config.seed)
+
+        self.games_df = None
+        self.matchups_df = None
+        self.team_id_to_index = None
+        self.feature_cols = None
+
+    def prepare_data(self, rebuild_features: bool = False) -> None:
+        self.games_df = load_games_csv(self.csv_path)
+        store = SeasonToDateFeatureStore(self.games_df, cfg=self.feature_config)
+        self.matchups_df = build_matchup_feature_frame(self.games_df, store, rebuild=rebuild_features)
+        self.team_id_to_index = build_team_id_index(self.games_df)
+        self.feature_cols = get_continuous_feature_columns(self.matchups_df)
+
+    def make_split_dataloaders(
+        self,
+        split_ratio: Tuple[float, float, float],
+        standardizer: Standardizer | None = None,
+    ):
+        train_ratio, val_ratio, test_ratio = split_ratio
+
+        # Implemented proper train/validation/test split with documented split ratios (3 pts)
+        train_raw, val_raw, test_raw = chronological_split(
+            self.matchups_df,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+        )
+
+        train_df = train_raw.copy()
+        val_df = val_raw.copy()
+        test_df = test_raw.copy()
+
+        if standardizer is None:
+            # Properly normalized or standardized input features/data appropriate to your modality (3 pts)
+            standardizer = Standardizer()
+            train_df = standardizer.fit_transform(train_df, self.feature_cols)
+            val_df = standardizer.transform(val_df, self.feature_cols)
+            test_df = standardizer.transform(test_df, self.feature_cols)
+        else:
+            train_df = standardizer.transform(train_df, self.feature_cols)
+            val_df = standardizer.transform(val_df, self.feature_cols)
+            test_df = standardizer.transform(test_df, self.feature_cols)
+
+        # Used appropriate data loading with batching and shuffling (PyTorch DataLoader or equivalent) (3 pts)
+        train_ds = BasketballMatchupDataset(train_df, self.feature_cols, self.team_id_to_index)
+        val_ds = BasketballMatchupDataset(val_df, self.feature_cols, self.team_id_to_index)
+        test_ds = BasketballMatchupDataset(test_df, self.feature_cols, self.team_id_to_index)
+
+        train_loader = DataLoader(train_ds, batch_size=self.train_config.batch_size, shuffle=True)
+        val_loader = DataLoader(val_ds, batch_size=self.train_config.batch_size, shuffle=False)
+        test_loader = DataLoader(test_ds, batch_size=self.train_config.batch_size, shuffle=False)
+
+        return train_raw, val_raw, test_raw, train_loader, val_loader, test_loader, standardizer
+
+
+def get_device() -> torch.device:
+    # Trained model using GPU/TPU/CUDA acceleration (3 pts)
+    if torch.cuda.is_available():
+        print("CUDA AVAILABLE")
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def predict_model(model: BasketballScoreMLP, loader: DataLoader) -> Tuple[np.ndarray, np.ndarray]:
+    device = get_device()
+    model.eval()
+    preds: List[np.ndarray] = []
+    trues: List[np.ndarray] = []
+
+    with torch.no_grad():
+        for batch in loader:
+            x = batch["x"].to(device)
+            team1_id = batch["team1_id"].to(device)
+            team2_id = batch["team2_id"].to(device)
+            y = batch["y"].to(device)
+
+            pred = model(x, team1_id, team2_id)
+            preds.append(pred.cpu().numpy())
+            trues.append(y.cpu().numpy())
+
+    return np.vstack(preds), np.vstack(trues)
+
+
+def main():
+    # Load metadata
+    with open("model_outputs/best_score_model_meta.json", "r") as f:
+        metadata = json.load(f)
+
+    split_ratio = tuple(metadata["best_split_ratio"])
+    model_config = ModelConfig(**metadata["model_config"])
+    train_config = TrainConfig(**metadata["train_config"])
+
+    # Load standardizer
+    standardizer_data = torch.load("model_outputs/best_standardizer.pt")
+    standardizer = Standardizer()
+    standardizer.means = pd.Series(standardizer_data["means"])
+    standardizer.stds = pd.Series(standardizer_data["stds"])
+    feature_cols = standardizer_data["feature_cols"]
+    team_id_to_index = standardizer_data["team_id_to_index"]
+
+    # Prepare data
+    runner = ExperimentRunner(
+        csv_path="mbb_games.csv",
+        output_dir="model_outputs",
+        feature_config=FeatureConfig(verbose=True),
+        train_config=train_config,
+    )
+    runner.prepare_data(rebuild_features=False)
+
+    # Make test loader with the loaded standardizer
+    _, _, test_raw, _, _, test_loader, _ = runner.make_split_dataloaders(split_ratio, standardizer)
+
+    # Load model
+    model = BasketballScoreMLP(model_config)
+    model.load_state_dict(torch.load("model_outputs/best_score_model.pt"))
+    model.to(get_device())
+
+    # Predict
+    y_pred, y_true = predict_model(model, test_loader)
+
+    # Plot
+    plots_dir = Path("model_outputs/plots")
+
+    output_path = plots_dir / "best_model_actual_vs_predicted_total.png"
+    title = "Actual vs Predicted Total Points - Best Model"
+    plot_actual_vs_predicted(y_pred, y_true, output_path, title)
+
+    print(f"Actual vs Predicted plot saved to {output_path}")
+
+    # load df from model_outputs/experiment_results.csv and plot metric bars for val_mse and val_mae
+    results_df = pd.read_csv("model_outputs/experiment_results.csv")
+
+    plot_metric_bars(
+        results_df,
+        metric="mse",
+        output_path=str(plots_dir / "model_comparison_mse.png"),
+        title="Test MSE Comparison Across Baselines and Neural Models",
+    )
+    print(f"MSE comparison plot saved to {plots_dir / 'model_comparison_mse.png'}")
+    plot_metric_bars(
+        results_df,
+        metric="winner_accuracy",
+        output_path=str(plots_dir / "model_comparison_winner_accuracy.png"),
+        title="Winner Accuracy Comparison Across Baselines and Neural Models",
+    )
+    print(f"Winner accuracy comparison plot saved to {plots_dir / 'model_comparison_winner_accuracy.png'}")
+
+
+
+if __name__ == "__main__":
+    main()
