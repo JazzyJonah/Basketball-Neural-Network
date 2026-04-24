@@ -1,53 +1,16 @@
-# Historical Basketball Predictor Scaffold
+# Basketball Neural Network
 
-## What is included
+## What it Does
+It predicts basketball games! It uses a multi-layer perceptron with three hidden linear layers to convert its inputs (including advanced statistics of each team) into score outputs. It uses snapshots from the past to predict basketball games based on the information available at the time of the snapshot. Currently, only a "historical predictor" is available, since we're in the off-season. However, it has the capabilities to predict future scheduled games, too.
 
-- `scripts/build_teams.py` — one-time SportsDataverse export for `teams.json`
-- `scripts/build_games.py` — season game index builder from `mbb_games.csv`
-- `scripts/build_snapshots.py` — exports per-season historical team snapshots from `team_feature_cache.pkl.gz`
-- `scripts/export_model_to_onnx.py` — exports the trained PyTorch model to ONNX plus browser metadata
-- `scripts/build_all.py` — convenience entry point that runs all of the above
-- `web/` — a Vite + React + TypeScript historical viewer with:
-  - past-game prediction only
-  - soft browser-side rate limiting (15 requests per minute)
-  - on-page logging panel
-  - clear error banner
+## Quick start
+To use the model, just head to the [website](https://jazzyjonah.github.io/Basketball-Neural-Network/)! To copy the model locally, follow the instructions in `SETUP.md`.
 
-## Expected local files before running the build scripts
+## Video Links
+Video links here
 
-Place these in the same root directory where you run the scripts:
+## Evaluation
+The best model achieved a total accuracy of 72.8%. For reference, a model that simply chose the team with the better record had an accuracy of only 66.8%. Furthermore, the RMSE was just 10.8. Lastly, the model has a plethora of amazing guesses (available in `model_outputs/best_game_by_score.csv`)--it correctly guessed the exact score in over a hundred games. Notably, it exactly predicted the score of Notre Dame's overtime win against Butler in the 2015 Second Round. (The reason this is notable is that Duke won in 2015)!
 
-- `mbb_games.csv`
-- `season_features.py`
-- `basketball_model.py`
-- `model_outputs/best_score_model.pt`
-- `model_outputs/best_score_model_meta.json`
-- `model_outputs/best_standardizer.pt`
-- `team_feature_cache.pkl.gz`
-
-## Build the static artifacts
-
-From the project root:
-
-```bash
-python scripts/build_all.py --csv mbb_games.csv --feature-cache team_feature_cache.pkl.gz --model-dir model_outputs --web-root web/public
-```
-
-## Run the frontend locally
-
-```bash
-cd web
-npm install
-npm run dev
-```
-
-## Deploy to GitHub Pages later
-
-Once the static artifacts are inside `web/public`, a normal Vite build will bundle the site.
-Then you can deploy `web/dist` with GitHub Pages.
-
-## Notes
-
-- The current scaffold is **historical viewer only**.
-- The upcoming-game viewer can reuse the same ONNX model and team snapshot logic later.
-- The rate limiting in this version is a **browser-only soft limit**. It is good enough for a demo, but it is not tamper-proof.
+## Individual Contributions
+I was the sole contributor to this project.
