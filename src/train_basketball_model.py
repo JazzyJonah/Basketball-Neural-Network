@@ -182,7 +182,7 @@ def run_epoch(
 
     return float(np.mean(losses)), np.vstack(preds), np.vstack(trues)
 
-
+# Modular code design with reusable functions and classes rather than monolithic scripts
 def train_single_model(
     train_loader: DataLoader,
     val_loader: DataLoader,

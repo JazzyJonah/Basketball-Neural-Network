@@ -63,9 +63,9 @@ OUTPUT_COLUMNS = [
 ]
 
 
-# ============================================================
+
 # Properly normalized or standardized input features/data
-# ============================================================
+
 def resolve_columns(
     df: pd.DataFrame, alias_map: Dict[str, List[str]]
 ) -> Dict[str, str]:
@@ -350,9 +350,9 @@ def coerce_int(value: Any) -> Optional[int]:
     except Exception:
         return None
 
-
+# Applied basic preprocessing appropriate to your modality (e.g., image resizing, text tokenization, handling missing values)
 def basic_stat_logic(team: Dict[str, int]) -> bool:
-    """Validate basic team stat relationships and ranges.
+    """Validate basic team stat relationships and ranges. If not, treated as missing value and discarded.
 
     Args:
         team: Dictionary of team statistics keyed by canonical stat names.

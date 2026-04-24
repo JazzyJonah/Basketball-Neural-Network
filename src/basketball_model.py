@@ -37,8 +37,8 @@ class TrainConfig:
     seed: int = 42
 
 
+
 # Defined and trained a custom neural network architecture (substantially designed by you, not a pretrained model) using PyTorch or similar framework (5 pts)
-# Applied regularization techniques to prevent overfitting (at least two of: L1/L2 penalty, dropout, early stopping) (5 pts)
 class BasketballScoreMLP(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -65,7 +65,7 @@ class BasketballScoreMLP(nn.Module):
         return self.output_head(x)
 
 
-# Modular code design with reusable functions and classes rather than monolithic scripts
+# Applied regularization techniques to prevent overfitting (at least two of: L1/L2 penalty, dropout, early stopping) (5 pts)
 class EarlyStopping:
     def __init__(self, patience: int = 10, min_delta: float = 0.0):
         self.patience = patience
