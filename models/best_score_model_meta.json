@@ -31,6 +31,6 @@
     0.15,
     0.15
   ],
-  "weights_path": "model_outputs\\best_score_model.pt",
-  "standardizer_path": "model_outputs\\best_standardizer.pt"
+  "weights_path": "models\\best_score_model.pt",
+  "standardizer_path": "models\\best_standardizer.pt"
 }

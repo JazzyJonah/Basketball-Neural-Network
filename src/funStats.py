@@ -2,7 +2,7 @@ import pandas as pd
 import sportsdataverse.mbb as mbb
 
 
-def load_games(csv_path: str = "mbb_games.csv") -> pd.DataFrame:
+def load_games(csv_path: str = "data/mbb_games.csv") -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     return df
@@ -153,7 +153,7 @@ def print_fewest_team_fouls(
 
 
 if __name__ == "__main__":
-    games = load_games("mbb_games.csv")
+    games = load_games("data/mbb_games.csv")
     lookup = load_team_lookup()
 
     # print_largest_point_differential(games, lookup, n=5, ignoreNonD1=True)

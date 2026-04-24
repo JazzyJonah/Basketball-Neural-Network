@@ -26,8 +26,8 @@ from season_features import (
 class ExperimentRunner:
     def __init__(
         self,
-        csv_path: str = "mbb_games.csv",
-        output_dir: str = "model_outputs",
+        csv_path: str = "data/mbb_games.csv",
+        output_dir: str = "models",
         feature_config: FeatureConfig | None = None,
         train_config: TrainConfig | None = None,
     ):
@@ -122,7 +122,7 @@ def predict_model(model: BasketballScoreMLP, loader: DataLoader) -> Tuple[np.nda
 
 def main():
     # Load metadata
-    with open("model_outputs/best_score_model_meta.json", "r") as f:
+    with open("models/best_score_model_meta.json", "r") as f:
         metadata = json.load(f)
 
     split_ratio = tuple(metadata["best_split_ratio"])
@@ -130,7 +130,7 @@ def main():
     train_config = TrainConfig(**metadata["train_config"])
 
     # Load standardizer
-    standardizer_data = torch.load("model_outputs/best_standardizer.pt")
+    standardizer_data = torch.load("models/best_standardizer.pt")
     standardizer = Standardizer()
     standardizer.means = pd.Series(standardizer_data["means"])
     standardizer.stds = pd.Series(standardizer_data["stds"])
@@ -139,8 +139,8 @@ def main():
 
     # Prepare data
     runner = ExperimentRunner(
-        csv_path="mbb_games.csv",
-        output_dir="model_outputs",
+        csv_path="data/mbb_games.csv",
+        output_dir="models",
         feature_config=FeatureConfig(verbose=True),
         train_config=train_config,
     )
@@ -151,14 +151,14 @@ def main():
 
     # Load model
     model = BasketballScoreMLP(model_config)
-    model.load_state_dict(torch.load("model_outputs/best_score_model.pt"))
+    model.load_state_dict(torch.load("models/best_score_model.pt"))
     model.to(get_device())
 
     # Predict
     y_pred, y_true = predict_model(model, test_loader)
 
     # Plot
-    plots_dir = Path("model_outputs/plots")
+    plots_dir = Path("models/plots")
 
     output_path = plots_dir / "best_model_actual_vs_predicted_total.png"
     title = "Actual vs Predicted Total Points - Best Model"
@@ -166,8 +166,8 @@ def main():
 
     print(f"Actual vs Predicted plot saved to {output_path}")
 
-    # load df from model_outputs/experiment_results.csv and plot metric bars for val_mse and val_mae
-    results_df = pd.read_csv("model_outputs/experiment_results.csv")
+    # load df from models/experiment_results.csv and plot metric bars for val_mse and val_mae
+    results_df = pd.read_csv("models/experiment_results.csv")
 
     plot_metric_bars(
         results_df,

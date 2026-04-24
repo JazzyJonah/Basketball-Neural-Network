@@ -17,8 +17,8 @@ from tqdm.auto import tqdm
 class FeatureConfig:
     fta_weight: float = 0.44
     decay_days: int = 180
-    feature_cache_path: str = "team_feature_cache.pkl.gz"
-    matchup_cache_path: str = "matchup_feature_cache.pkl.gz"
+    feature_cache_path: str = "data/team_feature_cache.pkl.gz"
+    matchup_cache_path: str = "data/matchup_feature_cache.pkl.gz"
     sort_cache_by_date: bool = True
     verbose: bool = True
 
@@ -845,7 +845,7 @@ class BasketballMatchupDataset(Dataset):
 
 # Used appropriate data loading with batching and shuffling (PyTorch DataLoader or equivalent) (3 pts)
 def build_dataloaders(
-    csv_path: str = "mbb_games.csv",
+    csv_path: str = "data/mbb_games.csv",
     cfg: Optional[FeatureConfig] = None,
     batch_size: int = 128,
     rebuild_features: bool = False,
@@ -913,8 +913,8 @@ def build_dataloaders(
 
 if __name__ == "__main__":
     cfg = FeatureConfig(
-        feature_cache_path="team_feature_cache.pkl.gz",
-        matchup_cache_path="matchup_feature_cache.pkl.gz",
+        feature_cache_path="data/team_feature_cache.pkl.gz",
+        matchup_cache_path="data/matchup_feature_cache.pkl.gz",
         decay_days=180,
         fta_weight=0.44,
         verbose=True,
@@ -928,7 +928,7 @@ if __name__ == "__main__":
         standardizer,
         team_id_to_index,
     ) = build_dataloaders(
-        csv_path="mbb_games.csv",
+        csv_path="data/mbb_games.csv",
         cfg=cfg,
         batch_size=128,
         rebuild_features=False,

@@ -165,7 +165,7 @@ def compute_game_scores(full_df: pd.DataFrame, preds: np.ndarray) -> pd.DataFram
 
 
 def main() -> None:
-    model_dir = Path("model_outputs")
+    model_dir = Path("models")
     weights_path = model_dir / "best_score_model.pt"
     metadata_path = model_dir / "best_score_model_meta.json"
     standardizer_path = model_dir / "best_standardizer.pt"
@@ -187,9 +187,9 @@ def main() -> None:
     stds = pd.Series(standardizer_blob["stds"], dtype=np.float32)
 
     full_df, dataset, _, _ = build_full_dataset(
-        csv_path="mbb_games.csv",
-        feature_cache_path="team_feature_cache.pkl.gz",
-        matchup_cache_path="matchup_feature_cache.pkl.gz",
+        csv_path="data/mbb_games.csv",
+        feature_cache_path="data/team_feature_cache.pkl.gz",
+        matchup_cache_path="data/matchup_feature_cache.pkl.gz",
         means=means,
         stds=stds,
     )

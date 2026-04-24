@@ -16,7 +16,7 @@ from tqdm.auto import tqdm
 @dataclass
 class GameExportConfig:
     seasons: List[int]
-    output_csv: str = "mbb_games.csv"
+    output_csv: str = "data/mbb_games.csv"
     points_tolerance_pct: float = 0.05
     rebounds_tolerance_pct: float = 0.25
     groups: int = 50
@@ -976,7 +976,7 @@ class CollegeBasketballGameExporter:
 
 def export_mbb_games_to_csv(
     seasons: List[int],
-    output_csv: str = "mbb_games.csv",
+    output_csv: str = "data/mbb_games.csv",
     max_games: Optional[int] = None,
 ) -> pd.DataFrame:
     """Convenience function to export games for given seasons to a CSV file.
@@ -1003,8 +1003,8 @@ def export_mbb_games_to_csv(
 if __name__ == "__main__":
     df = export_mbb_games_to_csv(
         seasons=[i for i in range(2001, 2027)],
-        output_csv="mbb_games.csv",
+        output_csv="data/mbb_games.csv",
         max_games=None,  # Start at ~20, then change to None once testing works
     )
     print(df.head())
-    print(f"Wrote {len(df):,} valid games to mbb_games.csv")
+    print(f"Wrote {len(df):,} valid games to data/mbb_games.csv")

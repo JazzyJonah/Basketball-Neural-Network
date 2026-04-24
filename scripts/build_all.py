@@ -12,10 +12,10 @@ from export_model_to_onnx import export_model
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='Build all static artifacts for the historical viewer.')
-    parser.add_argument('--csv', default='mbb_games.csv')
+    parser.add_argument('--csv', default='data/mbb_games.csv')
     parser.add_argument('--web-root', default='web/public')
-    parser.add_argument('--feature-cache', default='team_feature_cache.pkl.gz')
-    parser.add_argument('--model-dir', default='model_outputs')
+    parser.add_argument('--feature-cache', default='data/team_feature_cache.pkl.gz')
+    parser.add_argument('--model-dir', default='models')
     args = parser.parse_args()
 
     web_root = Path(args.web_root)

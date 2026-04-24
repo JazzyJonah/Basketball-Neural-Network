@@ -47,8 +47,8 @@ from season_features import (
 class ExperimentRunner:
     def __init__(
         self,
-        csv_path: str = "mbb_games.csv",
-        output_dir: str = "model_outputs",
+        csv_path: str = "data/mbb_games.csv",
+        output_dir: str = "models",
         feature_config: FeatureConfig | None = None,
         train_config: TrainConfig | None = None,
     ):
@@ -351,14 +351,14 @@ def merge_experiment_rows(
 
 def main(only_optimizers: List[str] | None = None) -> None:
     optimizer_options = only_optimizers or ["sgd", "adam", "adamw"]
-    output_dir = Path("model_outputs")
+    output_dir = Path("models")
     plots_dir = output_dir / "plots"
     output_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     feature_config = FeatureConfig(
-        feature_cache_path="team_feature_cache.pkl.gz",
-        matchup_cache_path="matchup_feature_cache.pkl.gz",
+        feature_cache_path="data/team_feature_cache.pkl.gz",
+        matchup_cache_path="data/matchup_feature_cache.pkl.gz",
         verbose=True,
     )
 
@@ -376,7 +376,7 @@ def main(only_optimizers: List[str] | None = None) -> None:
     )
 
     runner = ExperimentRunner(
-        csv_path="mbb_games.csv",
+        csv_path="data/mbb_games.csv",
         output_dir=str(output_dir),
         feature_config=feature_config,
         train_config=train_config,
@@ -536,7 +536,7 @@ def main(only_optimizers: List[str] | None = None) -> None:
         print(f"Saved metadata to: {output_dir / 'best_score_model_meta.json'}")
 
     print(f"[plots] Training curves and comparison charts saved under: {plots_dir}")
-    print("Finished. Results written to model_outputs/experiment_results.csv")
+    print("Finished. Results written to models/experiment_results.csv")
 
 
 if __name__ == "__main__":
