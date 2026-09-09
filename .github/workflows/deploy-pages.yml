@@ -15,7 +15,7 @@ on:
       timezone: "America/New_York"
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -47,9 +47,30 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-pages.txt
 
-      - name: Refresh upcoming NCAA schedule
+      - name: Add newly completed NCAA games
+        run: python scripts/update_completed_games.py
+
+      - name: Rebuild historical game index
+        run: python scripts/build_games.py
+
+      - name: Rebuild current-season historical snapshots
+        run: python scripts/build_current_season_snapshot.py --season 2027
+
+      - name: Refresh upcoming NCAA schedule and prediction features
+        run: python scripts/build_upcoming_games.py
+
+      - name: Persist newly completed games
         run: |
-          python scripts/build_upcoming_games.py
+          if git diff --quiet -- data/mbb_games.csv; then
+            echo "No new completed games to commit."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add data/mbb_games.csv
+            git commit -m "chore: refresh completed NCAA games [skip ci]"
+            git push
+          fi
 
       # ------------------------------------------------------------
       # FRONTEND BUILD
